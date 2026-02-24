@@ -45,13 +45,17 @@ def gemini_client():
         st.stop()
     return genai.Client(api_key=api_key)
 
-def gemini_generate(prompt):
-    client = gemini_client()
-    resp = client.models.generate_content(
-        model="gemini-2.0-flash",
-        contents=prompt
-    )
-    return resp.text
+def gemini_generate(prompt: str) -> str:
+    try:
+        client = gemini_client()
+        resp = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=prompt
+        )
+        return resp.text or "(Sin respuesta)"
+    except Exception as e:
+        # Muestra error real en Streamlit para depurar
+        return f"❌ Error llamando a Gemini: {type(e).__name__} — {e}"
 
 # ===================== MANUAL =====================
 @st.cache_data
