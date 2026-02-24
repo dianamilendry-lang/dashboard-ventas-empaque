@@ -181,6 +181,159 @@ def pareto_gap_clientes(df: pd.DataFrame) -> pd.DataFrame:
     deficit["deficit_acum_pct"] = (deficit["deficit_acum_kg"] / total_def) * 100 if total_def > 0 else 0
     return deficit
 
+def _pct(a: float, b: float) -> float:
+    return (a / b * 100) if b and b != 0 else 0.0
+
+def generar_conclusiones(
+    df_ytd: pd.DataFrame,
+    df_anual: pd.DataFrame,
+    df_periodo: pd.DataFrame,
+    ultimo_mes: str | None,
+    top_n: int = 5
+) -> dict:
+    """
+    Devuelve texto estructurado (conclusiones/recomendaciones/riesgos)
+    basado en cálculos del dashboard. No inventa datos.
+    """
+    # --- Ejecutivo (YTD + proyección) ---
+    actual_ytd = float(df_ytd["actual_kg"].sum())
+    budget_ytd = float(df_ytd["budget_kg"].sum())
+    var_ytd = actual_ytd - budget_ytd
+    cumpl_ytd = _pct(actual_ytd, budget_ytd)
+
+    budget_anual = float(df_anual["budget_kg"].sum())
+    # meses transcurridos = meses presentes en df_ytd
+    meses_transcurridos = int(df_ytd["mes"].nunique()) if not df_ytd.empty else 0
+    run_rate = (actual_ytd / meses_transcurridos) if meses_transcurridos > 0 else 0.0
+    proyeccion_anual = run_rate * 12
+    proy_pct = _pct(proyeccion_anual, budget_anual)
+
+    meses_restantes = 12 - meses_transcurridos
+    meta_restante = budget_anual - actual_ytd
+    kg_necesarios_mes = (meta_restante / meses_restantes) if meses_restantes > 0 else 0.0
+
+    # Semáforo proyección
+    if proy_pct >= 100:
+        semaforo = "🟢 En ruta / sobre meta"
+    elif proy_pct >= 95:
+        semaforo = "🟡 Riesgo moderado"
+    else:
+        semaforo = "🔴 Riesgo alto"
+
+    # --- Periodo seleccionado (análisis) ---
+    actual_p = float(df_periodo["actual_kg"].sum())
+    budget_p = float(df_periodo["budget_kg"].sum())
+    var_p = actual_p - budget_p
+    cumpl_p = _pct(actual_p, budget_p)
+
+    # --- Top gaps (clientes/SKUs) ---
+    by_cliente = (
+        df_periodo.groupby("Nombre de cliente", as_index=False)[["actual_kg","budget_kg"]].sum()
+    )
+    by_cliente["var_kg"] = by_cliente["actual_kg"] - by_cliente["budget_kg"]
+    clientes_deficit = by_cliente[by_cliente["var_kg"] < 0].sort_values("var_kg").head(top_n)
+
+    by_sku = (
+        df_periodo.groupby(["ItemCode","ItemName"], as_index=False)[["actual_kg","budget_kg"]].sum()
+    )
+    by_sku["var_kg"] = by_sku["actual_kg"] - by_sku["budget_kg"]
+    skus_deficit = by_sku[by_sku["var_kg"] < 0].sort_values("var_kg").head(top_n)
+
+    # --- Pareto déficit ---
+    pareto = pareto_gap_clientes(df_periodo)
+    pct_80 = None
+    if not pareto.empty:
+        # cuántos clientes explican ~80% del déficit
+        n80 = int((pareto["deficit_acum_pct"] <= 80).sum())
+        # si justo no cae en 80, sumamos 1 para cubrirlo
+        n80 = min(n80 + 1, len(pareto))
+        pct_80 = {"clientes": n80, "total_deficit": float(pareto["deficit_kg"].sum())}
+
+    # --- Controles calidad ---
+    ventas_sin_pres = df_periodo[(df_periodo["budget_kg"] == 0) & (df_periodo["actual_kg"] > 0)]
+    pres_sin_ventas = df_periodo[(df_periodo["actual_kg"] == 0) & (df_periodo["budget_kg"] > 0)]
+    kgs_ventas_sin_pres = float(ventas_sin_pres["actual_kg"].sum())
+    kgs_pres_sin_ventas = float(pres_sin_ventas["budget_kg"].sum())
+
+    # ================== Construcción narrativa ==================
+    conclusiones = []
+    recomendaciones = []
+    riesgos = []
+
+    # Conclusiones ejecutivas
+    if ultimo_mes:
+        conclusiones.append(
+            f"**YTD hasta {ultimo_mes}:** {actual_ytd:,.0f} KG vs {budget_ytd:,.0f} KG "
+            f"({cumpl_ytd:.1f}%); varianza {var_ytd:,.0f} KG."
+        )
+    else:
+        conclusiones.append("**YTD:** No se detectó un mes con ventas > 0 para calcular YTD automático.")
+
+    conclusiones.append(
+        f"**Proyección anual (run rate):** {proyeccion_anual:,.0f} KG vs presupuesto anual {budget_anual:,.0f} KG "
+        f"({proy_pct:.1f}%). Estado: {semaforo}."
+    )
+
+    if meses_restantes > 0:
+        conclusiones.append(
+            f"**Ritmo requerido:** para cumplir el presupuesto anual faltan {meta_restante:,.0f} KG en {meses_restantes} meses "
+            f"(~{kg_necesarios_mes:,.0f} KG/mes)."
+        )
+
+    # Conclusiones del periodo seleccionado
+    conclusiones.append(
+        f"**Periodo seleccionado:** {actual_p:,.0f} KG vs {budget_p:,.0f} KG ({cumpl_p:.1f}%), varianza {var_p:,.0f} KG."
+    )
+
+    # Recomendaciones sugeridas (no decisiones)
+    if proy_pct < 95:
+        recomendaciones.append("Activar **plan de recuperación**: enfocar gestión en cuentas con mayor déficit, revisar pipeline y mix.")
+    elif proy_pct < 100:
+        recomendaciones.append("Mantener seguimiento semanal: cerrar brechas en clientes/SKUs deficitarios para asegurar cierre ≥ 100%.")
+
+    if not clientes_deficit.empty:
+        rec_cli = ", ".join([str(x) for x in clientes_deficit["Nombre de cliente"].head(3).tolist()])
+        recomendaciones.append(
+            f"Priorizar gestión en **Top {min(top_n, len(clientes_deficit))} clientes con déficit** (ej.: {rec_cli}) "
+            f"para capturar el mayor impacto de corto plazo."
+        )
+    else:
+        recomendaciones.append("No se observan clientes con déficit en el periodo seleccionado (según data cargada).")
+
+    if pct_80:
+        recomendaciones.append(
+            f"Usar enfoque **Pareto**: ~{pct_80['clientes']} clientes explican ~80% del déficit "
+            f"(déficit total {pct_80['total_deficit']:,.0f} KG)."
+        )
+
+    if not skus_deficit.empty:
+        recomendaciones.append(
+            "Revisar **SKUs con déficit**: validar disponibilidad/lead time, competitividad y condiciones comerciales."
+        )
+
+    if kgs_ventas_sin_pres > 0:
+        recomendaciones.append(
+            f"Revisar **ventas sin presupuesto** ({kgs_ventas_sin_pres:,.0f} KG): puede requerir actualizar presupuesto "
+            f"o crear metas para nuevos SKUs/clientes."
+        )
+    if kgs_pres_sin_ventas > 0:
+        recomendaciones.append(
+            f"Revisar **presupuesto sin ventas** ({kgs_pres_sin_ventas:,.0f} KG): identificar cuentas/SKUs sin tracción "
+            f"y ajustar plan comercial."
+        )
+
+    # Riesgos / supuestos
+    if kgs_ventas_sin_pres > 0 or kgs_pres_sin_ventas > 0:
+        riesgos.append("Existe desalineación entre presupuesto y ventas (SKUs/cliente). Esto afecta lectura de cumplimiento por cliente.")
+    riesgos.append("El dashboard asume consistencia de columnas mensuales y nombres de cliente/SKU entre archivos.")
+
+    return {
+        "conclusiones": conclusiones,
+        "recomendaciones": recomendaciones,
+        "riesgos": riesgos,
+        "semaforo": semaforo,
+    }
+
 # ===================== UI =====================
 st.title("📊 Dashboard Gerencial — Cumplimiento vs Presupuesto (KG)")
 tab1, tab2, tab3 = st.tabs(["1) Cargar Excel", "2) Dashboard (KG)", "3) Asistente IA Técnico"])
