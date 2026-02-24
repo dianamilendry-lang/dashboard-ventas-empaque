@@ -8,7 +8,7 @@ from google import genai
 
 st.set_page_config(page_title="Dashboard + IA Generativa", layout="wide")
 
-MANUAL_PATH = os.path.join("manual_tecnico", "Manual_tecnico_preventa.pdf")
+MANUAL_PATH = "Manual_tecnico_preventa.pdf"
 
 MESES_ORDEN = [
     "Enero","Febrero","Marzo","Abril","Mayo","Junio",
