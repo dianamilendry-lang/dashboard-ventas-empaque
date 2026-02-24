@@ -1,41 +1,31 @@
-# app.py
 import os
 import pandas as pd
 import streamlit as st
 import plotly.express as px
 
-# ===================== CONFIG =====================
+# ========= CONFIG =========
 st.set_page_config(page_title="Dashboard Ventas vs Presupuesto (KG)", layout="wide")
 
 MESES_ORDEN = [
-    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+    "Enero","Febrero","Marzo","Abril","Mayo","Junio",
+    "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"
 ]
 
-# Ventas (tu reporte): columnas de KG por mes
 MESES_VENTAS = {
-    "Enero": "Ene_KG",
-    "Febrero": "Feb_KG",
-    "Marzo": "Mar_KG",
-    "Abril": "Abr_KG",
-    "Mayo": "May_KG",
-    "Junio": "Jun_KG",
-    "Julio": "Jul_KG",
-    "Agosto": "Ago_KG",
-    "Septiembre": "Sep_KG",
-    "Octubre": "Oct_KG",
-    "Noviembre": "Nov_KG",
-    "Diciembre": "Dic_KG",
+    "Enero": "Ene_KG", "Febrero": "Feb_KG", "Marzo": "Mar_KG", "Abril": "Abr_KG",
+    "Mayo": "May_KG", "Junio": "Jun_KG", "Julio": "Jul_KG", "Agosto": "Ago_KG",
+    "Septiembre": "Sep_KG", "Octubre": "Oct_KG", "Noviembre": "Nov_KG", "Diciembre": "Dic_KG",
 }
 
-# Presupuesto: columnas por mes en KG (ENE..DIC)
 MESES_PRES = {
     "Enero": "ENE", "Febrero": "FEB", "Marzo": "MAR", "Abril": "ABR",
     "Mayo": "MAY", "Junio": "JUN", "Julio": "JUL", "Agosto": "AGO",
     "Septiembre": "SEP", "Octubre": "OCT", "Noviembre": "NOV", "Diciembre": "DIC",
 }
 
-# ===================== HELPERS =====================
+MANUAL_PATH = "manual_tecnico/Manual_tecnico_preventa.pdf"
+
+# ========= HELPERS =========
 def _num(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce").fillna(0)
 
@@ -46,16 +36,6 @@ def _pct(a: float, b: float) -> float:
     return (a / b * 100) if b and b != 0 else 0.0
 
 def normalizar_ventas(df: pd.DataFrame, anio: int) -> pd.DataFrame:
-    """
-    1 fila por (anio, mes, cliente, sku) con actual_kg.
-    Requiere en ventas:
-      - SlpName
-      - Código de cliente/proveedor
-      - Nombre de cliente/proveedor
-      - ItemCode
-      - ItemName
-      - columnas Ene_KG..Dic_KG
-    """
     id_cols = [
         "SlpName",
         "Código de cliente/proveedor",
@@ -88,11 +68,6 @@ def normalizar_ventas(df: pd.DataFrame, anio: int) -> pd.DataFrame:
     return long
 
 def normalizar_presupuesto(df: pd.DataFrame, anio: int) -> pd.DataFrame:
-    """
-    1 fila por (anio, mes, cliente, sku) con budget_kg.
-    Mínimo: Nombre de cliente + ItemCode + ENE..DIC
-    Opcionales: Clasificación, Nombre SKU, PAÍS
-    """
     required = ["Nombre de cliente", "ItemCode"]
     faltan = [c for c in required if c not in df.columns]
     if faltan:
@@ -120,14 +95,10 @@ def normalizar_presupuesto(df: pd.DataFrame, anio: int) -> pd.DataFrame:
     return long
 
 def calcular_cumplimiento(ventas_long: pd.DataFrame, pres_long: pd.DataFrame) -> pd.DataFrame:
-    """
-    Merge correcto por cliente + sku + mes (gap real por cliente).
-    """
     merged = ventas_long.merge(
         pres_long,
         on=["anio", "mes", "ItemCode", "Nombre de cliente"],
-        how="left",
-        suffixes=("_act", "_bud")
+        how="left"
     )
     merged["budget_kg"] = merged["budget_kg"].fillna(0)
     merged["var_kg"] = merged["actual_kg"] - merged["budget_kg"]
@@ -138,25 +109,17 @@ def kpis(df: pd.DataFrame) -> dict:
     actual = float(df["actual_kg"].sum())
     budget = float(df["budget_kg"].sum())
     var = actual - budget
-    cumpl = (actual / budget * 100) if budget > 0 else 0.0
+    cumpl = _pct(actual, budget)
     return {"actual": actual, "budget": budget, "var": var, "cumpl": cumpl}
 
-def ultimo_mes_con_ventas(df_filtrado: pd.DataFrame) -> str | None:
-    by_mes = (
-        df_filtrado.groupby("mes", as_index=False)["actual_kg"]
-        .sum()
-        .sort_values("mes")
-    )
+def ultimo_mes_con_ventas(df_filtrado: pd.DataFrame):
+    by_mes = df_filtrado.groupby("mes", as_index=False)["actual_kg"].sum().sort_values("mes")
     by_mes = by_mes[by_mes["actual_kg"] > 0]
     if by_mes.empty:
         return None
     return str(by_mes.iloc[-1]["mes"])
 
 def pareto_gap_clientes(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Pareto del GAP negativo por cliente (solo déficit).
-    Retorna tabla con acumulado y % acumulado del déficit.
-    """
     by_cliente = df.groupby("Nombre de cliente", as_index=False)[["actual_kg", "budget_kg"]].sum()
     by_cliente["var_kg"] = by_cliente["actual_kg"] - by_cliente["budget_kg"]
     deficit = by_cliente[by_cliente["var_kg"] < 0].copy()
@@ -169,13 +132,7 @@ def pareto_gap_clientes(df: pd.DataFrame) -> pd.DataFrame:
     deficit["deficit_acum_pct"] = (deficit["deficit_acum_kg"] / total_def) * 100 if total_def > 0 else 0
     return deficit
 
-def generar_conclusiones(
-    df_ytd: pd.DataFrame,
-    df_anual: pd.DataFrame,
-    df_periodo: pd.DataFrame,
-    ultimo_mes: str | None,
-    top_n: int = 5
-) -> dict:
+def generar_conclusiones(df_ytd: pd.DataFrame, df_anual: pd.DataFrame, df_periodo: pd.DataFrame, ultimo_mes: str | None, top_n: int = 5):
     actual_ytd = float(df_ytd["actual_kg"].sum())
     budget_ytd = float(df_ytd["budget_kg"].sum())
     var_ytd = actual_ytd - budget_ytd
@@ -274,11 +231,30 @@ def generar_conclusiones(
 
     return {"conclusiones": conclusiones, "recomendaciones": recomendaciones, "riesgos": riesgos, "semaforo": semaforo}
 
-# ===================== UI =====================
-st.title("📊 Dashboard Gerencial — Cumplimiento vs Presupuesto (KG)")
-tab1, tab2, tab3 = st.tabs(["1) Cargar Excel", "2) Dashboard (KG)", "3) Asistente IA Preventa"])
+@st.cache_data(show_spinner=False)
+def cargar_manual_texto(pdf_path: str) -> str:
+    try:
+        from PyPDF2 import PdfReader
+        reader = PdfReader(pdf_path)
+        texto = ""
+        for page in reader.pages:
+            t = page.extract_text() or ""
+            texto += t + "\n"
+        return texto.strip()
+    except Exception:
+        return ""
 
-# --------------------- TAB 1 ---------------------
+def leer_api_key():
+    try:
+        return st.secrets.get("OPENAI_API_KEY", None)
+    except Exception:
+        return os.environ.get("OPENAI_API_KEY")
+
+# ========= UI =========
+st.title("📊 Dashboard Gerencial — Cumplimiento vs Presupuesto (KG)")
+tab1, tab2, tab3 = st.tabs(["1) Cargar Excel", "2) Dashboard (KG)", "3) Asistente IA Preventa (sin Vector Store)"])
+
+# ----- TAB 1 -----
 with tab1:
     st.subheader("Carga mensual de data (Excel)")
     colA, colB = st.columns(2)
@@ -290,8 +266,6 @@ with tab1:
     with colB:
         anio_pres = st.number_input("Año Presupuesto", min_value=2020, max_value=2035, value=2026, step=1)
         pres_file = st.file_uploader("Sube tu 'Presupuesto de ventas' (.xlsx)", type=["xlsx"], key="pres")
-
-    st.caption("Tip: si tus Excel tienen varias hojas, procura que la primera hoja sea la tabla principal.")
 
     if st.button("Procesar archivos"):
         if ventas_file is None or pres_file is None:
@@ -311,7 +285,7 @@ with tab1:
             except Exception as e:
                 st.exception(e)
 
-# --------------------- TAB 2 ---------------------
+# ----- TAB 2 -----
 with tab2:
     st.subheader("Cumplimiento vs Presupuesto (KG)")
     if "df_final" not in st.session_state:
@@ -336,7 +310,7 @@ with tab2:
         ultimo_mes = ultimo_mes_con_ventas(df_all)
 
         if ultimo_mes is None:
-            st.warning("No hay ventas (KG) en el año/filtros seleccionados. No se puede calcular YTD automático.")
+            st.warning("No hay ventas (KG) con los filtros seleccionados. No se puede calcular YTD automático.")
             df_ytd = df_all.iloc[0:0].copy()
         else:
             idx_ultimo = MESES_ORDEN.index(ultimo_mes)
@@ -376,13 +350,11 @@ with tab2:
             c7.metric("Proyección vs Presupuesto anual", f"{proy_pct:.1f}%")
             c8.metric("Semáforo", semaforo)
 
-            st.caption(
-                f"KG necesarios por mes para cumplir la meta anual: {kg_necesarios_mes:,.0f} "
-                f"(con {meses_restantes} meses restantes)"
-            )
+            st.caption(f"KG necesarios por mes para cumplir la meta anual: {kg_necesarios_mes:,.0f} (meses restantes: {meses_restantes})")
 
         st.divider()
         st.markdown("## 🔎 Análisis (según meses seleccionados)")
+
         df = df_all.copy()
         if mes_sel:
             df = df[df["mes"].isin(mes_sel)]
@@ -420,87 +392,7 @@ with tab2:
                 for x in insights["riesgos"]:
                     st.markdown(f"- {x}")
 
-            st.markdown("### 🧷 Resumen para comité (copiar/pegar)")
-            actual_ytd = float(df_ytd["actual_kg"].sum())
-            budget_ytd = float(df_ytd["budget_kg"].sum())
-            cumpl_ytd = _pct(actual_ytd, budget_ytd)
-
-            budget_anual = float(df_all["budget_kg"].sum())
-            meses_transcurridos = int(df_ytd["mes"].nunique()) if not df_ytd.empty else 0
-            run_rate = (actual_ytd / meses_transcurridos) if meses_transcurridos > 0 else 0.0
-            proyeccion_anual = run_rate * 12
-            proy_pct = _pct(proyeccion_anual, budget_anual)
-
-            meses_restantes = 12 - meses_transcurridos
-            meta_restante = budget_anual - actual_ytd
-            kg_necesarios_mes = (meta_restante / meses_restantes) if meses_restantes > 0 else 0.0
-
-            by_cliente_tmp = df.groupby("Nombre de cliente", as_index=False)[["actual_kg", "budget_kg"]].sum()
-            by_cliente_tmp["var_kg"] = by_cliente_tmp["actual_kg"] - by_cliente_tmp["budget_kg"]
-            top_def_cli = by_cliente_tmp[by_cliente_tmp["var_kg"] < 0].sort_values("var_kg").head(3)
-            top_cli_txt = "Sin déficit por cliente en el periodo seleccionado." if top_def_cli.empty else "; ".join(
-                [f"{r['Nombre de cliente']} ({r['var_kg']:,.0f} KG)" for _, r in top_def_cli.iterrows()]
-            )
-
-            by_sku_tmp = df.groupby(["ItemCode", "ItemName"], as_index=False)[["actual_kg", "budget_kg"]].sum()
-            by_sku_tmp["var_kg"] = by_sku_tmp["actual_kg"] - by_sku_tmp["budget_kg"]
-            top_def_sku = by_sku_tmp[by_sku_tmp["var_kg"] < 0].sort_values("var_kg").head(3)
-            top_sku_txt = "Sin déficit por SKU en el periodo seleccionado." if top_def_sku.empty else "; ".join(
-                [f"{r['ItemCode']} ({r['var_kg']:,.0f} KG)" for _, r in top_def_sku.iterrows()]
-            )
-
-            sin_pres_kg = float(df[(df["budget_kg"] == 0) & (df["actual_kg"] > 0)]["actual_kg"].sum())
-            sin_ventas_kg = float(df[(df["actual_kg"] == 0) & (df["budget_kg"] > 0)]["budget_kg"].sum())
-            riesgo_txt = f"Control: ventas sin presupuesto {sin_pres_kg:,.0f} KG; presupuesto sin ventas {sin_ventas_kg:,.0f} KG."
-
-            pareto = pareto_gap_clientes(df)
-            if not pareto.empty:
-                n80 = int((pareto["deficit_acum_pct"] <= 80).sum())
-                n80 = min(n80 + 1, len(pareto))
-                top_clientes = pareto.head(min(5, len(pareto)))["Nombre de cliente"].tolist()
-                top_clientes_txt = ", ".join([str(x) for x in top_clientes])
-                accion_1 = f"Acción 1 (Pareto): enfoque en ~{n80} clientes que explican ~80% del déficit. Top: {top_clientes_txt}."
-            else:
-                accion_1 = "Acción 1 (Pareto): no aplica (no hay déficit por cliente en el periodo seleccionado)."
-
-            accion_2 = (
-                f"Acción 2 (Recuperación): sostener ~{kg_necesarios_mes:,.0f} KG/mes durante {meses_restantes} meses para cerrar ≥100%."
-                if meses_restantes > 0 else
-                "Acción 2 (Recuperación): no aplica (año completo / sin meses restantes)."
-            )
-
-            resumen = "\n".join([
-                f"1) YTD hasta {ultimo_mes}: {actual_ytd:,.0f} KG vs {budget_ytd:,.0f} KG ({cumpl_ytd:.1f}%).",
-                f"2) Proyección anual (run rate): {proyeccion_anual:,.0f} KG vs {budget_anual:,.0f} KG ({proy_pct:.1f}%).",
-                f"3) Top clientes con déficit (periodo): {top_cli_txt}",
-                f"4) Top SKUs con déficit (periodo): {top_sku_txt}",
-                f"5) {riesgo_txt}",
-                f"6) {accion_1}",
-                f"7) {accion_2}",
-            ])
-            st.text_area("Resumen", resumen, height=230)
-
         st.divider()
-        st.markdown("### 📉 GAP por Cliente (KG)")
-        by_cliente = df.groupby("Nombre de cliente", as_index=False)[["actual_kg", "budget_kg"]].sum()
-        by_cliente["var_kg"] = by_cliente["actual_kg"] - by_cliente["budget_kg"]
-        by_cliente["cumpl_pct"] = by_cliente.apply(lambda r: _pct(r["actual_kg"], r["budget_kg"]), axis=1)
-        by_cliente = by_cliente.sort_values("var_kg", ascending=True)
-        st.dataframe(by_cliente.head(30), use_container_width=True)
-
-        st.markdown("### Top SKUs con mayor gap (KG)")
-        by_sku = df.groupby(["ItemCode", "ItemName"], as_index=False)[["actual_kg", "budget_kg"]].sum()
-        by_sku["var_kg"] = by_sku["actual_kg"] - by_sku["budget_kg"]
-        by_sku = by_sku.sort_values("var_kg", ascending=True)
-        st.dataframe(by_sku.head(30), use_container_width=True)
-
-        if "Clasificación" in df.columns:
-            st.markdown("### Cumplimiento por Clasificación (KG)")
-            by_clas = df.groupby("Clasificación", as_index=False)[["actual_kg", "budget_kg"]].sum()
-            by_clas["cumpl_pct"] = by_clas.apply(lambda r: _pct(r["actual_kg"], r["budget_kg"]), axis=1)
-            by_clas = by_clas.sort_values("cumpl_pct", ascending=False)
-            st.plotly_chart(px.bar(by_clas, x="Clasificación", y="cumpl_pct"), use_container_width=True)
-
         st.markdown("### 🧩 Pareto del déficit (clientes que explican el GAP negativo)")
         pareto_tbl = pareto_gap_clientes(df)
         if pareto_tbl.empty:
@@ -510,78 +402,72 @@ with tab2:
                 pareto_tbl[["Nombre de cliente", "deficit_kg", "deficit_acum_kg", "deficit_acum_pct"]].head(30),
                 use_container_width=True
             )
-            chart = pareto_tbl.copy()
-            chart["rank"] = range(1, len(chart) + 1)
-            st.plotly_chart(px.line(chart, x="rank", y="deficit_acum_pct", markers=True), use_container_width=True)
 
-        st.markdown("### 🧪 Controles (calidad del cruce)")
-        ccol1, ccol2 = st.columns(2)
-        with ccol1:
-            st.markdown("**Ventas sin presupuesto (budget = 0 y actual > 0)**")
-            sin_pres = df[(df["budget_kg"] == 0) & (df["actual_kg"] > 0)].copy()
-            cols = [c for c in ["Nombre de cliente", "ItemCode", "ItemName", "mes", "actual_kg", "budget_kg"] if c in sin_pres.columns]
-            st.dataframe(sin_pres[cols].sort_values("actual_kg", ascending=False).head(50), use_container_width=True)
-
-        with ccol2:
-            st.markdown("**Presupuesto sin ventas (actual = 0 y budget > 0)**")
-            sin_ventas = df[(df["actual_kg"] == 0) & (df["budget_kg"] > 0)].copy()
-            cols2 = [c for c in ["Nombre de cliente", "ItemCode", "mes", "actual_kg", "budget_kg"] if c in sin_ventas.columns]
-            st.dataframe(sin_ventas[cols2].sort_values("budget_kg", ascending=False).head(50), use_container_width=True)
-
-# --------------------- TAB 3: Asistente Preventa (permanente) ---------------------
-# ===============================
-# TAB — ASISTENTE IA PREVENTA
-# ===============================
-
+# ----- TAB 3 (SIN VECTOR STORE) -----
 with tab3:
-    st.subheader("Asistente IA — Modo Preventa Estratégico")
-    st.caption("Responde SOLO con base en el manual cargado localmente.")
+    st.subheader("Asistente IA — Modo Preventa Estratégico (sin Vector Store)")
+    st.caption("Usa el manual en PDF del repositorio. Si no hay evidencia, pedirá datos faltantes. No inventa.")
 
-    # Cargar manual local
-    manual_path = "manual_tecnico/Manual_tecnico_preventa.pdf"
+    # 1) Cargar manual desde repo
+    manual_texto = ""
+    if os.path.exists(MANUAL_PATH):
+        manual_texto = cargar_manual_texto(MANUAL_PATH)
 
-    try:
-        from PyPDF2 import PdfReader
-        reader = PdfReader(manual_path)
-        manual_text = ""
-        for page in reader.pages:
-            manual_text += page.extract_text()
-    except:
-        manual_text = "Manual no encontrado en carpeta manual_tecnico."
+    if not manual_texto:
+        st.warning(
+            "No se encontró el manual o no se pudo leer.\n\n"
+            f"Verifica que exista en tu repo: `{MANUAL_PATH}`"
+        )
+        st.stop()
 
-    pregunta = st.chat_input("Pregunta técnica (ej: bobina para detergente 1kg)")
+    with st.expander("📄 Ver estado del manual cargado"):
+        st.write(f"Ruta: {MANUAL_PATH}")
+        st.write(f"Caracteres leídos: {len(manual_texto):,}")
+        st.caption("Si ves 0 caracteres, el PDF puede ser escaneado (imagen) y no texto. En ese caso hay que convertirlo a PDF con texto.")
 
-    if pregunta:
-        from openai import OpenAI
-        client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
-
-        prompt = f"""
-Eres un asistente técnico en modo preventa.
-Responde SOLO con base en el siguiente manual.
-Si no hay evidencia suficiente, pide datos faltantes.
-
-MANUAL:
-{manual_text}
-
-Pregunta:
-{pregunta}
-"""
-
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            input=prompt
+    # 2) API key (opcional, pero necesaria para responder)
+    api_key = leer_api_key()
+    if not api_key:
+        st.info(
+            "Para activar el asistente, agrega tu `OPENAI_API_KEY` en Streamlit Secrets.\n\n"
+            "Mientras tanto, el dashboard funciona normal."
         )
 
-        st.markdown(response.output_text)
+    # 3) Chat
+    if "chat_preventa" not in st.session_state:
+        st.session_state["chat_preventa"] = []
+
+    for msg in st.session_state["chat_preventa"]:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+
+    user_q = st.chat_input("Ej: Snack 250g, VFFS, vida útil 6 meses. Cliente quiere bajar micras. ¿Qué ofrezco?")
+
+    if user_q:
+        st.session_state["chat_preventa"].append({"role": "user", "content": user_q})
+        with st.chat_message("user"):
+            st.markdown(user_q)
+
+        with st.chat_message("assistant"):
+            if not api_key:
+                st.markdown(
+                    "No puedo responder aún porque falta `OPENAI_API_KEY` en Secrets.\n\n"
+                    "Cuando la agregues, podrás usar el asistente."
+                )
+            else:
+                try:
+                    from openai import OpenAI
+                    client = OpenAI(api_key=api_key)
+
                     system_instructions = """
 Eres un asistente de PREVENTA ESTRATÉGICO para empaque plástico flexible (bolsa/bobina).
 Reglas obligatorias:
-- Responde SOLO usando evidencia encontrada en el manual (file_search). Si el manual no tiene información suficiente, NO inventes: pide datos faltantes del checklist.
-- Siempre propone dos opciones cuando sea viable:
+- Responde SOLO usando el contenido del manual que recibes abajo.
+- Si el manual no tiene información suficiente, NO inventes: pide datos faltantes del checklist.
+- Siempre ofrece dos opciones cuando sea viable:
   A) Opción técnica segura (menor riesgo)
   B) Opción optimizada costo (si es viable)
-- Incluye: micras totales sugeridas, margen de seguridad aplicado, riesgos técnicos y comerciales, nota para producción.
-- Formato de salida:
+- Formato:
   1) Recomendación técnica base (estructura + micras + nivel barrera)
   2) Alternativa optimizada costo (estructura + micras) [si aplica]
   3) Margen de seguridad aplicado (y por qué)
@@ -589,25 +475,26 @@ Reglas obligatorias:
   5) Impacto comercial (vida útil / reclamo / negociación)
   6) Nota para producción (pruebas requeridas)
   7) Datos faltantes (si aplica)
-  8) Evidencia del manual (resumen de secciones relevantes)
+  8) Evidencia del manual (qué parte sustenta la respuesta)
 """
+
+                    # Para evitar prompts gigantes, recortamos el manual si es muy largo.
+                    # (Esto mejora estabilidad y costos). Ajusta si tu manual crece mucho.
+                    MAX_CHARS = 25000
+                    manual_for_prompt = manual_texto[:MAX_CHARS]
 
                     resp = client.responses.create(
                         model="gpt-4.1-mini",
                         input=[
                             {"role": "system", "content": system_instructions},
-                            {"role": "user", "content": user_q},
+                            {"role": "user", "content": f"MANUAL:\n{manual_for_prompt}\n\nPREGUNTA:\n{user_q}"},
                         ],
-                        tools=[{
-                            "type": "file_search",
-                            "vector_store_ids": [vector_store_id]
-                        }],
                     )
 
                     answer = resp.output_text
                     st.markdown(answer)
-                    st.session_state["chat"].append({"role": "assistant", "content": answer})
+                    st.session_state["chat_preventa"].append({"role": "assistant", "content": answer})
 
                 except Exception as e:
-                    st.error("Error llamando a OpenAI. Revisa API key y que el Vector Store exista.")
+                    st.error("No se pudo conectar a OpenAI. Revisa tu API Key (puede estar inválida o sin billing).")
                     st.exception(e)
