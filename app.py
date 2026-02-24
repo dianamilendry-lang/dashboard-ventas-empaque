@@ -529,139 +529,50 @@ with tab2:
             st.dataframe(sin_ventas[cols2].sort_values("budget_kg", ascending=False).head(50), use_container_width=True)
 
 # --------------------- TAB 3: Asistente Preventa (permanente) ---------------------
+# ===============================
+# TAB — ASISTENTE IA PREVENTA
+# ===============================
+
 with tab3:
-    st.subheader("Asistente IA — Modo Preventa Estratégico (manual permanente)")
-    st.caption("Responde SOLO con evidencia del manual. Si no hay evidencia, pide datos faltantes (no inventa).")
+    st.subheader("Asistente IA — Modo Preventa Estratégico")
+    st.caption("Responde SOLO con base en el manual cargado localmente.")
 
-    # --- API KEY ---
-    api_key = None
-try:
-    api_key = st.secrets["OPENAI_API_KEY"]
-except Exception:
-    api_key = os.environ.get("OPENAI_API_KEY")
-
-if not api_key:
-    st.warning("Configura OPENAI_API_KEY en Streamlit Secrets para activar el asistente.")
-else:
-
-    # --- Vector Store ID permanente (Secrets) ---
-    vs_secret = None
-    try:
-        vs_secret = st.secrets.get("OPENAI_VECTOR_STORE_ID", None)
-    except Exception:
-        vs_secret = os.environ.get("OPENAI_VECTOR_STORE_ID")
-
-    if "vector_store_id" not in st.session_state:
-        st.session_state["vector_store_id"] = vs_secret
-
-    vector_store_id = st.session_state.get("vector_store_id") or vs_secret
-
-    st.markdown("### Estado")
-    if vector_store_id:
-        st.success(f"✅ Manual activo (Vector Store): {vector_store_id}")
-        st.info("Si este ID está en Secrets como OPENAI_VECTOR_STORE_ID, queda permanente.")
-    else:
-        st.warning("Aún no hay Vector Store permanente. Crea uno abajo (1 sola vez) y guarda el ID en Secrets.")
-
-    st.divider()
-
-    st.markdown("### 1) Subir/actualizar manual (PDF)")
-    manual_file = st.file_uploader("Sube tu manual técnico en PDF", type=["pdf"], key="manual_pdf_perm")
-
-    col1, col2, col3 = st.columns(3)
-    crear_nuevo = col1.button("📚 Crear base nueva", use_container_width=True)
-    actualizar = col2.button("➕ Agregar/Actualizar PDF", use_container_width=True)
-    reset = col3.button("🧨 Reset (olvidar ID en sesión)", use_container_width=True)
-
-    if reset:
-        st.session_state["vector_store_id"] = None
-        st.warning("Se limpió el Vector Store de la sesión. Si tenías uno en Secrets, recarga la página.")
-        st.stop()
+    # Cargar manual local
+    manual_path = "manual_tecnico/Manual_tecnico_preventa.pdf"
 
     try:
+        from PyPDF2 import PdfReader
+        reader = PdfReader(manual_path)
+        manual_text = ""
+        for page in reader.pages:
+            manual_text += page.extract_text()
+    except:
+        manual_text = "Manual no encontrado en carpeta manual_tecnico."
+
+    pregunta = st.chat_input("Pregunta técnica (ej: bobina para detergente 1kg)")
+
+    if pregunta:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key)
+        client = OpenAI(api_key=st.secrets["OPENAI_API_KEY"])
 
-        if crear_nuevo:
-            if manual_file is None:
-                st.error("Primero sube un PDF del manual.")
-            else:
-                tmp_path = os.path.join("/tmp", manual_file.name)
-                with open(tmp_path, "wb") as f:
-                    f.write(manual_file.getbuffer())
+        prompt = f"""
+Eres un asistente técnico en modo preventa.
+Responde SOLO con base en el siguiente manual.
+Si no hay evidencia suficiente, pide datos faltantes.
 
-                vs = client.vector_stores.create(name=f"Manual preventa - {manual_file.name}")
-                st.session_state["vector_store_id"] = vs.id
-                vector_store_id = vs.id
+MANUAL:
+{manual_text}
 
-                file_obj = client.files.create(file=open(tmp_path, "rb"), purpose="assistants")
+Pregunta:
+{pregunta}
+"""
 
-                batch = client.vector_stores.file_batches.create_and_poll(
-                    vector_store_id=vs.id,
-                    file_ids=[file_obj.id]
-                )
+        response = client.responses.create(
+            model="gpt-4.1-mini",
+            input=prompt
+        )
 
-                if batch.status == "completed":
-                    st.success(f"✅ Manual indexado. Vector Store creado: {vs.id}")
-                    st.info("👉 Para que sea PERMANENTE: copia este ID y pégalo en Streamlit Secrets como OPENAI_VECTOR_STORE_ID. Luego reinicia la app.")
-                    st.code(f'OPENAI_VECTOR_STORE_ID = "{vs.id}"', language="toml")
-                else:
-                    st.warning(f"Estado del indexado: {batch.status}. Si no dice completed, intenta nuevamente.")
-
-        if actualizar:
-            if manual_file is None:
-                st.error("Primero sube un PDF del manual.")
-            elif not vector_store_id:
-                st.error("No existe Vector Store aún. Primero crea una base nueva.")
-            else:
-                tmp_path = os.path.join("/tmp", manual_file.name)
-                with open(tmp_path, "wb") as f:
-                    f.write(manual_file.getbuffer())
-
-                file_obj = client.files.create(file=open(tmp_path, "rb"), purpose="assistants")
-
-                batch = client.vector_stores.file_batches.create_and_poll(
-                    vector_store_id=vector_store_id,
-                    file_ids=[file_obj.id]
-                )
-
-                if batch.status == "completed":
-                    st.success(f"✅ PDF agregado/actualizado en el Vector Store: {vector_store_id}")
-                else:
-                    st.warning(f"Estado del indexado: {batch.status}. Si no dice completed, intenta de nuevo.")
-
-    except Exception as e:
-        st.error("Error conectando con OpenAI o indexando el PDF. Revisa tu OPENAI_API_KEY.")
-        st.exception(e)
-
-    st.divider()
-
-    st.markdown("### 2) Consulta técnica/comercial (modo preventa)")
-    st.caption("Incluye: producto, peso, vida útil, máquina (VFFS/HFFS), si hay grasa/humedad y formato (bolsa/bobina).")
-
-    if "chat" not in st.session_state:
-        st.session_state["chat"] = []
-
-    for msg in st.session_state["chat"]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-    user_q = st.chat_input("Ej: snack 250g, VFFS, vida útil 6 meses. Cliente quiere bajar micras. ¿Qué ofrezco?")
-
-    if user_q:
-        st.session_state["chat"].append({"role": "user", "content": user_q})
-        with st.chat_message("user"):
-            st.markdown(user_q)
-
-        with st.chat_message("assistant"):
-            vector_store_id = st.session_state.get("vector_store_id") or vs_secret
-            if not vector_store_id:
-                st.markdown("Primero crea la base del manual y guarda el ID en Secrets (OPENAI_VECTOR_STORE_ID).")
-            else:
-                try:
-                    from openai import OpenAI
-                    client = OpenAI(api_key=api_key)
-
+        st.markdown(response.output_text)
                     system_instructions = """
 Eres un asistente de PREVENTA ESTRATÉGICO para empaque plástico flexible (bolsa/bobina).
 Reglas obligatorias:
