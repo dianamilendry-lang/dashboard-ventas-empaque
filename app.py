@@ -1,9 +1,14 @@
 import os
+import re
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Optional
+
 import pandas as pd
 import streamlit as st
 import plotly.express as px
 
-# ========= CONFIG =========
+
+# ===================== CONFIG =====================
 st.set_page_config(page_title="Dashboard Ventas vs Presupuesto (KG)", layout="wide")
 
 MESES_ORDEN = [
@@ -11,21 +16,34 @@ MESES_ORDEN = [
     "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"
 ]
 
+# Ventas (tu reporte): columnas de KG por mes
 MESES_VENTAS = {
-    "Enero": "Ene_KG", "Febrero": "Feb_KG", "Marzo": "Mar_KG", "Abril": "Abr_KG",
-    "Mayo": "May_KG", "Junio": "Jun_KG", "Julio": "Jul_KG", "Agosto": "Ago_KG",
-    "Septiembre": "Sep_KG", "Octubre": "Oct_KG", "Noviembre": "Nov_KG", "Diciembre": "Dic_KG",
+    "Enero": "Ene_KG",
+    "Febrero": "Feb_KG",
+    "Marzo": "Mar_KG",
+    "Abril": "Abr_KG",
+    "Mayo": "May_KG",
+    "Junio": "Jun_KG",
+    "Julio": "Jul_KG",
+    "Agosto": "Ago_KG",
+    "Septiembre": "Sep_KG",
+    "Octubre": "Oct_KG",
+    "Noviembre": "Nov_KG",
+    "Diciembre": "Dic_KG",
 }
 
+# Presupuesto: columnas por mes en KG (ENE..DIC)
 MESES_PRES = {
     "Enero": "ENE", "Febrero": "FEB", "Marzo": "MAR", "Abril": "ABR",
     "Mayo": "MAY", "Junio": "JUN", "Julio": "JUL", "Agosto": "AGO",
     "Septiembre": "SEP", "Octubre": "OCT", "Noviembre": "NOV", "Diciembre": "DIC",
 }
 
-MANUAL_PATH = "manual_tecnico/Manual_tecnico_preventa.pdf"
+# Manual local dentro del repo (ya lo subiste)
+MANUAL_PATH = os.path.join("manual_tecnico", "Manual_tecnico_preventa.pdf")
 
-# ========= HELPERS =========
+
+# ===================== HELPERS NUM =====================
 def _num(s: pd.Series) -> pd.Series:
     return pd.to_numeric(s, errors="coerce").fillna(0)
 
@@ -35,7 +53,19 @@ def _strip_series(s: pd.Series) -> pd.Series:
 def _pct(a: float, b: float) -> float:
     return (a / b * 100) if b and b != 0 else 0.0
 
+
+# ===================== NORMALIZACIÓN =====================
 def normalizar_ventas(df: pd.DataFrame, anio: int) -> pd.DataFrame:
+    """
+    1 fila por (anio, mes, cliente, sku) con actual_kg.
+    Requiere en ventas:
+      - SlpName
+      - Código de cliente/proveedor
+      - Nombre de cliente/proveedor
+      - ItemCode
+      - ItemName
+      - columnas Ene_KG..Dic_KG
+    """
     id_cols = [
         "SlpName",
         "Código de cliente/proveedor",
@@ -68,6 +98,10 @@ def normalizar_ventas(df: pd.DataFrame, anio: int) -> pd.DataFrame:
     return long
 
 def normalizar_presupuesto(df: pd.DataFrame, anio: int) -> pd.DataFrame:
+    """
+    1 fila por (anio, mes, cliente, sku) con budget_kg.
+    Mínimo: Nombre de cliente + ItemCode + ENE..DIC
+    """
     required = ["Nombre de cliente", "ItemCode"]
     faltan = [c for c in required if c not in df.columns]
     if faltan:
@@ -98,7 +132,7 @@ def calcular_cumplimiento(ventas_long: pd.DataFrame, pres_long: pd.DataFrame) ->
     merged = ventas_long.merge(
         pres_long,
         on=["anio", "mes", "ItemCode", "Nombre de cliente"],
-        how="left"
+        how="left",
     )
     merged["budget_kg"] = merged["budget_kg"].fillna(0)
     merged["var_kg"] = merged["actual_kg"] - merged["budget_kg"]
@@ -112,8 +146,12 @@ def kpis(df: pd.DataFrame) -> dict:
     cumpl = _pct(actual, budget)
     return {"actual": actual, "budget": budget, "var": var, "cumpl": cumpl}
 
-def ultimo_mes_con_ventas(df_filtrado: pd.DataFrame):
-    by_mes = df_filtrado.groupby("mes", as_index=False)["actual_kg"].sum().sort_values("mes")
+def ultimo_mes_con_ventas(df_filtrado: pd.DataFrame) -> Optional[str]:
+    by_mes = (
+        df_filtrado.groupby("mes", as_index=False)["actual_kg"]
+        .sum()
+        .sort_values("mes")
+    )
     by_mes = by_mes[by_mes["actual_kg"] > 0]
     if by_mes.empty:
         return None
@@ -132,7 +170,15 @@ def pareto_gap_clientes(df: pd.DataFrame) -> pd.DataFrame:
     deficit["deficit_acum_pct"] = (deficit["deficit_acum_kg"] / total_def) * 100 if total_def > 0 else 0
     return deficit
 
-def generar_conclusiones(df_ytd: pd.DataFrame, df_anual: pd.DataFrame, df_periodo: pd.DataFrame, ultimo_mes: str | None, top_n: int = 5):
+
+# ===================== CONCLUSIONES (DASHBOARD) =====================
+def generar_conclusiones(
+    df_ytd: pd.DataFrame,
+    df_anual: pd.DataFrame,
+    df_periodo: pd.DataFrame,
+    ultimo_mes: str | None,
+    top_n: int = 5
+) -> dict:
     actual_ytd = float(df_ytd["actual_kg"].sum())
     budget_ytd = float(df_ytd["budget_kg"].sum())
     var_ytd = actual_ytd - budget_ytd
@@ -164,10 +210,6 @@ def generar_conclusiones(df_ytd: pd.DataFrame, df_anual: pd.DataFrame, df_period
     by_cliente["var_kg"] = by_cliente["actual_kg"] - by_cliente["budget_kg"]
     clientes_deficit = by_cliente[by_cliente["var_kg"] < 0].sort_values("var_kg").head(top_n)
 
-    by_sku = df_periodo.groupby(["ItemCode", "ItemName"], as_index=False)[["actual_kg", "budget_kg"]].sum()
-    by_sku["var_kg"] = by_sku["actual_kg"] - by_sku["budget_kg"]
-    skus_deficit = by_sku[by_sku["var_kg"] < 0].sort_values("var_kg").head(top_n)
-
     pareto = pareto_gap_clientes(df_periodo)
     pareto_msg = None
     if not pareto.empty:
@@ -175,11 +217,6 @@ def generar_conclusiones(df_ytd: pd.DataFrame, df_anual: pd.DataFrame, df_period
         n80 = min(n80 + 1, len(pareto))
         total_def = float(pareto["deficit_kg"].sum())
         pareto_msg = f"Enfoque Pareto: ~{n80} clientes explican ~80% del déficit (déficit total {total_def:,.0f} KG)."
-
-    ventas_sin_pres = df_periodo[(df_periodo["budget_kg"] == 0) & (df_periodo["actual_kg"] > 0)]
-    pres_sin_ventas = df_periodo[(df_periodo["actual_kg"] == 0) & (df_periodo["budget_kg"] > 0)]
-    kgs_ventas_sin_pres = float(ventas_sin_pres["actual_kg"].sum())
-    kgs_pres_sin_ventas = float(pres_sin_ventas["budget_kg"].sum())
 
     conclusiones = []
     if ultimo_mes:
@@ -205,56 +242,346 @@ def generar_conclusiones(df_ytd: pd.DataFrame, df_anual: pd.DataFrame, df_period
     if proy_pct < 95:
         recomendaciones.append("Activar **plan de recuperación**: priorizar cuentas con déficit y revisar pipeline/mix.")
     elif proy_pct < 100:
-        recomendaciones.append("Seguimiento **semanal**: cerrar brechas en clientes/SKUs deficitarios para asegurar cierre ≥100%.")
+        recomendaciones.append("Seguimiento **semanal**: cerrar brechas en clientes deficitarios para asegurar cierre ≥100%.")
 
     if not clientes_deficit.empty:
         top3 = ", ".join([str(x) for x in clientes_deficit["Nombre de cliente"].head(3).tolist()])
-        recomendaciones.append(f"Priorizar gestión en **Top {min(top_n, len(clientes_deficit))} clientes con déficit** (ej.: {top3}).")
-    else:
-        recomendaciones.append("No se observan clientes con déficit en el periodo seleccionado (según data cargada).")
+        recomendaciones.append(f"Priorizar gestión en **clientes con déficit** (ej.: {top3}).")
 
     if pareto_msg:
         recomendaciones.append(pareto_msg)
 
-    if not skus_deficit.empty:
-        recomendaciones.append("Revisar **SKUs con déficit**: disponibilidad/lead time, competitividad y condiciones comerciales.")
-
-    if kgs_ventas_sin_pres > 0:
-        recomendaciones.append(f"Revisar **ventas sin presupuesto** ({kgs_ventas_sin_pres:,.0f} KG): posible actualización de metas/presupuesto.")
-    if kgs_pres_sin_ventas > 0:
-        recomendaciones.append(f"Revisar **presupuesto sin ventas** ({kgs_pres_sin_ventas:,.0f} KG): identificar cuentas/SKUs sin tracción.")
-
-    riesgos = []
-    if kgs_ventas_sin_pres > 0 or kgs_pres_sin_ventas > 0:
-        riesgos.append("Desalineación entre presupuesto y ventas (cliente/SKU). Puede sesgar el cumplimiento por cliente.")
-    riesgos.append("El cruce requiere consistencia de nombres de cliente y ItemCode entre ambos archivos.")
+    riesgos = [
+        "El cruce requiere consistencia de nombres de cliente e ItemCode entre Ventas y Presupuesto.",
+        "Si hay ventas sin presupuesto o presupuesto sin ventas, el cumplimiento por cliente puede sesgarse.",
+    ]
 
     return {"conclusiones": conclusiones, "recomendaciones": recomendaciones, "riesgos": riesgos, "semaforo": semaforo}
 
+
+# ===================== ASISTENTE PREVENTA OFFLINE (PDF + REGLAS) =====================
 @st.cache_data(show_spinner=False)
-def cargar_manual_texto(pdf_path: str) -> str:
+def leer_pdf_texto(path: str) -> str:
     try:
         from PyPDF2 import PdfReader
-        reader = PdfReader(pdf_path)
-        texto = ""
-        for page in reader.pages:
-            t = page.extract_text() or ""
-            texto += t + "\n"
-        return texto.strip()
+        reader = PdfReader(path)
+        txt = []
+        for p in reader.pages:
+            t = p.extract_text() or ""
+            txt.append(t)
+        return "\n".join(txt).strip()
     except Exception:
         return ""
 
-def leer_api_key():
-    try:
-        return st.secrets.get("OPENAI_API_KEY", None)
-    except Exception:
-        return os.environ.get("OPENAI_API_KEY")
+def _tokenize(s: str) -> List[str]:
+    s = s.lower()
+    s = re.sub(r"[^a-záéíóúñ0-9\s\-]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    toks = s.split(" ")
+    # quita tokens muy cortos
+    return [t for t in toks if len(t) >= 3]
 
-# ========= UI =========
+def buscar_en_manual(manual: str, query: str, top_k: int = 3) -> List[str]:
+    """
+    Búsqueda simple por relevancia (overlap de tokens).
+    Devuelve top_k fragmentos (paragraphs) del manual.
+    """
+    if not manual.strip():
+        return []
+    q_toks = set(_tokenize(query))
+    if not q_toks:
+        return []
+
+    # dividir en fragmentos (párrafos)
+    parts = [p.strip() for p in manual.split("\n") if p.strip()]
+    # agrupar líneas cercanas para tener fragmentos más útiles
+    chunks = []
+    buf = []
+    for line in parts:
+        buf.append(line)
+        if len(" ".join(buf)) > 500:
+            chunks.append(" ".join(buf))
+            buf = []
+    if buf:
+        chunks.append(" ".join(buf))
+
+    scored: List[Tuple[int, str]] = []
+    for c in chunks:
+        c_toks = set(_tokenize(c))
+        score = len(q_toks.intersection(c_toks))
+        if score > 0:
+            scored.append((score, c))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [c for _, c in scored[:top_k]]
+
+@dataclass
+class SpecsInput:
+    producto: Optional[str] = None
+    peso_g: Optional[int] = None
+    vida_meses: Optional[int] = None
+    maquina: Optional[str] = None  # VFFS/HFFS
+    formato: Optional[str] = None  # bolsa/bobina
+    grasa: Optional[bool] = None
+    humedad: Optional[bool] = None
+    quiere_bajar_micras: bool = False
+
+def parse_pregunta(q: str) -> SpecsInput:
+    s = q.lower()
+
+    # producto (heurístico)
+    producto = None
+    for key in ["café", "cafe", "snack", "detergente", "congel", "congelado", "congelados"]:
+        if key in s:
+            if "cafe" in key:
+                producto = "café"
+            elif "snack" in key:
+                producto = "snacks"
+            elif "detergente" in key:
+                producto = "detergente"
+            elif "congel" in key:
+                producto = "congelados"
+            break
+
+    # peso en g/kg
+    peso_g = None
+    mkg = re.search(r"(\d+(?:\.\d+)?)\s*kg", s)
+    if mkg:
+        try:
+            peso_g = int(float(mkg.group(1)) * 1000)
+        except:
+            pass
+    mg = re.search(r"(\d+)\s*g", s)
+    if mg and not peso_g:
+        try:
+            peso_g = int(mg.group(1))
+        except:
+            pass
+
+    # vida útil
+    vida_meses = None
+    mm = re.search(r"(\d+)\s*mes", s)
+    if mm:
+        try:
+            vida_meses = int(mm.group(1))
+        except:
+            pass
+    ma = re.search(r"(\d+)\s*año", s)
+    if ma:
+        try:
+            vida_meses = int(ma.group(1)) * 12
+        except:
+            pass
+
+    # máquina
+    maquina = None
+    if "vffs" in s:
+        maquina = "VFFS"
+    elif "hffs" in s:
+        maquina = "HFFS"
+
+    # formato
+    formato = None
+    if "bobina" in s:
+        formato = "bobina"
+    elif "bolsa" in s:
+        formato = "bolsa"
+
+    # grasa/humedad
+    grasa = None
+    if "graso" in s or "grasa" in s:
+        grasa = True
+    if "sin grasa" in s or "no graso" in s:
+        grasa = False
+
+    humedad = None
+    if "humedad" in s or "higros" in s:
+        humedad = True
+
+    quiere_bajar_micras = any(x in s for x in ["bajar micra", "reducir micra", "bajar calibre", "reducir calibre", "bajar micras", "reducir micras"])
+
+    return SpecsInput(
+        producto=producto,
+        peso_g=peso_g,
+        vida_meses=vida_meses,
+        maquina=maquina,
+        formato=formato,
+        grasa=grasa,
+        humedad=humedad,
+        quiere_bajar_micras=quiere_bajar_micras
+    )
+
+def sugerir_micras_por_peso(peso_g: int) -> Tuple[int, int]:
+    """
+    Devuelve rango micras sugeridas (min,max) según manual.
+    """
+    if peso_g <= 100:
+        return (60, 70)
+    if peso_g <= 250:
+        return (70, 80)
+    if peso_g <= 500:
+        return (80, 90)
+    if peso_g <= 1000:
+        return (90, 110)
+    return (110, 150)
+
+def margen_seguridad(spec: SpecsInput) -> int:
+    """
+    Margen seguridad simple.
+    """
+    add = 0
+    # Alta velocidad no la detectamos; aquí usamos máquina y peso como proxy
+    if spec.peso_g and spec.peso_g >= 1000:
+        add += 5
+    if spec.maquina == "VFFS":
+        add += 5
+    if spec.vida_meses and spec.vida_meses > 12:
+        add += 5
+    if spec.formato == "bolsa":
+        add += 0
+    return add
+
+def recomendacion_por_producto(spec: SpecsInput) -> Dict[str, str]:
+    """
+    Reglas basadas en tu manual.
+    Devuelve estructuras base A (segura) y B (costo) si aplica.
+    """
+    prod = spec.producto or ""
+    if prod == "café":
+        return {
+            "A": "PET12 / AL7 / PE70 (alta barrera aroma)",
+            "B": "PET12 / METPET12 / PE70 (barrera media-alta, menor costo)"
+        }
+    if prod == "snacks":
+        return {
+            "A": "BOPP20 / METBOPP20 / CPP30 (snack graso, barrera media)",
+            "B": "PET12 / METPET12 / PE60 (alternativa costo según requerimiento)"
+        }
+    if prod == "detergente":
+        return {
+            "A": "PET12 / PE80–100 (resistencia + sellado)",
+            "B": "BOPP25 / PE90 (alternativa costo si máquina lo permite)"
+        }
+    if prod == "congelados":
+        return {
+            "A": "PET12 / PE100–110 (congelados, resistencia)",
+            "B": "BOPP20 / PE90 (alternativa costo si cumple performance)"
+        }
+    # genérico
+    return {
+        "A": "Estructura laminada con capa de sellado PE/CPP según máquina y producto",
+        "B": "Versión metalizada (METPET/METBOPP) si se requiere barrera y se busca optimizar costo"
+    }
+
+def validar_datos_minimos(spec: SpecsInput) -> List[str]:
+    faltan = []
+    if not spec.producto:
+        faltan.append("Producto (qué empacas: café/snack/detergente/congelado u otro)")
+    if not spec.peso_g:
+        faltan.append("Peso por unidad (g o kg)")
+    if not spec.vida_meses:
+        faltan.append("Vida útil requerida (meses)")
+    if not spec.maquina:
+        faltan.append("Tipo de máquina (VFFS o HFFS)")
+    if not spec.formato:
+        faltan.append("Formato (bolsa o bobina)")
+    return faltan
+
+def construir_respuesta_preventa(manual: str, pregunta: str) -> str:
+    spec = parse_pregunta(pregunta)
+    faltan = validar_datos_minimos(spec)
+
+    evidencias = buscar_en_manual(manual, pregunta, top_k=3)
+
+    # Si falta info crítica, pedirla (no inventar)
+    if faltan:
+        resp = []
+        resp.append("## 7) Datos faltantes (obligatorio para especificación final)")
+        for f in faltan:
+            resp.append(f"- {f}")
+        resp.append("\n---\n## 8) Evidencia del manual (fragmentos relacionados)")
+        if evidencias:
+            for i, e in enumerate(evidencias, 1):
+                resp.append(f"**Fragmento {i}:** {e[:900]}{'...' if len(e) > 900 else ''}")
+        else:
+            resp.append("_No se encontró fragmento relevante en el manual para la pregunta exacta. Recomiendo completar checklist._")
+        return "\n".join(resp)
+
+    # Recomendaciones
+    mic_min, mic_max = sugerir_micras_por_peso(spec.peso_g or 0)
+    add = margen_seguridad(spec)
+    mic_sugerida_min = mic_min + add
+    mic_sugerida_max = mic_max + add
+
+    estructuras = recomendacion_por_producto(spec)
+
+    # Riesgos (preventivos)
+    riesgos = []
+    if spec.vida_meses and spec.vida_meses > 12 and spec.producto != "café":
+        riesgos.append("Vida útil > 12 meses: validar barrera. Considerar aluminio si hay sensibilidad alta.")
+    if spec.peso_g and spec.peso_g > 1000 and mic_sugerida_min < 110:
+        riesgos.append("Peso > 1kg: evitar micras bajas. Riesgo de falla mecánica/sellos.")
+    if spec.maquina == "VFFS":
+        riesgos.append("VFFS: asegurar buen hot tack y ventana de sellado. Evitar estructura demasiado rígida.")
+    if spec.quiere_bajar_micras:
+        riesgos.append("Solicitud de bajar micras: aumenta riesgo de fuga, perforación y reclamo. Requiere prueba piloto.")
+
+    # Nota producción (estándar)
+    pruebas = [
+        "Validar ventana de sellado (set up).",
+        "Prueba de sellado / fuga.",
+        "Prueba de caída si peso ≥ 500g.",
+        "Revisión registro de impresión (si aplica).",
+    ]
+
+    # Construcción respuesta final
+    out = []
+    out.append("## 1) Recomendación técnica base (Opción A — segura)")
+    out.append(f"- **Estructura:** {estructuras['A']}")
+    out.append(f"- **Micras sugeridas:** {mic_sugerida_min}–{mic_sugerida_max} µ (incluye margen seguridad)")
+    out.append(f"- **Contexto detectado:** producto={spec.producto}, peso={spec.peso_g}g, vida útil={spec.vida_meses} meses, máquina={spec.maquina}, formato={spec.formato}")
+
+    out.append("\n## 2) Alternativa optimizada costo (Opción B)")
+    out.append(f"- **Estructura:** {estructuras['B']}")
+    out.append(f"- **Micras sugeridas:** {max(mic_min, mic_sugerida_min - 10)}–{max(mic_max, mic_sugerida_max - 10)} µ (solo si pruebas confirman)")
+
+    out.append("\n## 3) Margen de seguridad aplicado (y por qué)")
+    out.append(f"- **+{add} µ** por riesgo operativo (peso/máquina/vida útil según manual).")
+
+    out.append("\n## 4) Riesgo técnico (posibles fallas/reclamos)")
+    if riesgos:
+        for r in riesgos:
+            out.append(f"- {r}")
+    else:
+        out.append("- Riesgo bajo con la información actual; confirmar pruebas estándar de sellado.")
+
+    out.append("\n## 5) Impacto comercial (vida útil / reclamo / negociación)")
+    if spec.quiere_bajar_micras:
+        out.append("- Recomiendo **ofrecer B como alternativa** con condiciones: prueba piloto y validación de sellado. No bajar a ciegas para evitar reclamo.")
+    out.append("- Presentar A como opción robusta (menor reclamo) y B como opción costo (condicionada a pruebas).")
+
+    out.append("\n## 6) Nota para producción (pruebas requeridas)")
+    for p in pruebas:
+        out.append(f"- {p}")
+
+    out.append("\n## 7) Datos faltantes (si aplica)")
+    out.append("- Ninguno crítico detectado. Si hay restricciones de máquina (ancho, core, diámetro), agregarlas.")
+
+    out.append("\n---\n## 8) Evidencia del manual (fragmentos relacionados)")
+    if evidencias:
+        for i, e in enumerate(evidencias, 1):
+            out.append(f"**Fragmento {i}:** {e[:900]}{'...' if len(e) > 900 else ''}")
+    else:
+        out.append("_No se encontró fragmento relevante en el manual para la pregunta exacta. Revisa el manual o amplía la consulta._")
+
+    return "\n".join(out)
+
+
+# ===================== UI =====================
 st.title("📊 Dashboard Gerencial — Cumplimiento vs Presupuesto (KG)")
-tab1, tab2, tab3 = st.tabs(["1) Cargar Excel", "2) Dashboard (KG)", "3) Asistente IA Preventa (sin Vector Store)"])
+tab1, tab2, tab3 = st.tabs(["1) Cargar Excel", "2) Dashboard (KG)", "3) Asistente Preventa (PDF local)"])
 
-# ----- TAB 1 -----
+
+# -------- TAB 1: CARGA --------
 with tab1:
     st.subheader("Carga mensual de data (Excel)")
     colA, colB = st.columns(2)
@@ -266,6 +593,8 @@ with tab1:
     with colB:
         anio_pres = st.number_input("Año Presupuesto", min_value=2020, max_value=2035, value=2026, step=1)
         pres_file = st.file_uploader("Sube tu 'Presupuesto de ventas' (.xlsx)", type=["xlsx"], key="pres")
+
+    st.caption("Tip: si tus Excel tienen varias hojas, procura que la primera hoja sea la tabla principal.")
 
     if st.button("Procesar archivos"):
         if ventas_file is None or pres_file is None:
@@ -285,9 +614,11 @@ with tab1:
             except Exception as e:
                 st.exception(e)
 
-# ----- TAB 2 -----
+
+# -------- TAB 2: DASHBOARD --------
 with tab2:
     st.subheader("Cumplimiento vs Presupuesto (KG)")
+
     if "df_final" not in st.session_state:
         st.warning("Primero carga y procesa tus Excel en la pestaña 1.")
     else:
@@ -297,6 +628,7 @@ with tab2:
         anio = st.sidebar.selectbox("Año", sorted(df_all["anio"].unique()))
         df_all = df_all[df_all["anio"] == anio]
 
+        # Vendedor (solo si hay más de 1)
         if "SlpName" in df_all.columns:
             vendedores = sorted(df_all["SlpName"].dropna().unique())
             if len(vendedores) > 1:
@@ -332,11 +664,11 @@ with tab2:
             proy_pct = _pct(proyeccion_anual, budget_anual)
 
             if proy_pct >= 100:
-                semaforo = "🟢 Verde"
+                sem = "🟢 Verde"
             elif proy_pct >= 95:
-                semaforo = "🟡 Amarillo"
+                sem = "🟡 Amarillo"
             else:
-                semaforo = "🔴 Rojo"
+                sem = "🔴 Rojo"
 
             c1, c2, c3, c4 = st.columns(4)
             c1.metric(f"Actual YTD (KG) | hasta {ultimo_mes}", f"{actual_ytd:,.0f}")
@@ -348,13 +680,12 @@ with tab2:
             c5.metric("Run Rate (KG/mes)", f"{run_rate:,.0f}")
             c6.metric("Proyección anual (KG)", f"{proyeccion_anual:,.0f}")
             c7.metric("Proyección vs Presupuesto anual", f"{proy_pct:.1f}%")
-            c8.metric("Semáforo", semaforo)
+            c8.metric("Semáforo", sem)
 
-            st.caption(f"KG necesarios por mes para cumplir la meta anual: {kg_necesarios_mes:,.0f} (meses restantes: {meses_restantes})")
+            st.caption(f"KG necesarios/mes para cumplir meta anual: {kg_necesarios_mes:,.0f} (meses restantes: {meses_restantes})")
 
         st.divider()
         st.markdown("## 🔎 Análisis (según meses seleccionados)")
-
         df = df_all.copy()
         if mes_sel:
             df = df[df["mes"].isin(mes_sel)]
@@ -376,17 +707,14 @@ with tab2:
             st.info("No se generaron conclusiones porque no hay ventas > 0 para calcular YTD automático.")
         else:
             insights = generar_conclusiones(df_ytd=df_ytd, df_anual=df_all, df_periodo=df, ultimo_mes=ultimo_mes, top_n=5)
-
             colL, colR = st.columns([2, 1])
             with colL:
                 st.markdown("### Conclusiones")
                 for x in insights["conclusiones"]:
                     st.markdown(f"- {x}")
-
                 st.markdown("### Recomendaciones sugeridas")
                 for x in insights["recomendaciones"]:
                     st.markdown(f"- {x}")
-
             with colR:
                 st.markdown("### Riesgos / supuestos")
                 for x in insights["riesgos"]:
@@ -403,98 +731,43 @@ with tab2:
                 use_container_width=True
             )
 
-# ----- TAB 3 (SIN VECTOR STORE) -----
+
+# -------- TAB 3: ASISTENTE PREVENTA OFFLINE --------
 with tab3:
-    st.subheader("Asistente IA — Modo Preventa Estratégico (sin Vector Store)")
-    st.caption("Usa el manual en PDF del repositorio. Si no hay evidencia, pedirá datos faltantes. No inventa.")
+    st.subheader("Asistente Preventa — basado en PDF local (sin API)")
+    st.caption("Responde usando tu manual en el repositorio. Si faltan datos críticos, los pedirá. No inventa.")
 
-    # 1) Cargar manual desde repo
-    manual_texto = ""
-    if os.path.exists(MANUAL_PATH):
-        manual_texto = cargar_manual_texto(MANUAL_PATH)
-
-    if not manual_texto:
-        st.warning(
-            "No se encontró el manual o no se pudo leer.\n\n"
-            f"Verifica que exista en tu repo: `{MANUAL_PATH}`"
-        )
+    if not os.path.exists(MANUAL_PATH):
+        st.error(f"No encuentro el PDF del manual en: `{MANUAL_PATH}`")
+        st.info("Verifica que exista en GitHub: manual_tecnico/Manual_tecnico_preventa.pdf (respetando mayúsculas/minúsculas).")
         st.stop()
 
-    with st.expander("📄 Ver estado del manual cargado"):
+    manual_text = leer_pdf_texto(MANUAL_PATH)
+    if not manual_text:
+        st.warning("Pude abrir el PDF, pero no pude extraer texto. Puede ser un PDF escaneado (imagen).")
+        st.info("Solución: exporta el manual desde Google Docs como PDF (texto) y vuelve a subirlo al repo.")
+        st.stop()
+
+    with st.expander("📄 Estado del manual"):
         st.write(f"Ruta: {MANUAL_PATH}")
-        st.write(f"Caracteres leídos: {len(manual_texto):,}")
-        st.caption("Si ves 0 caracteres, el PDF puede ser escaneado (imagen) y no texto. En ese caso hay que convertirlo a PDF con texto.")
+        st.write(f"Texto extraído: {len(manual_text):,} caracteres")
+        st.caption("Si el texto es muy corto, revisa que el PDF no sea escaneado.")
 
-    # 2) API key (opcional, pero necesaria para responder)
-    api_key = leer_api_key()
-    if not api_key:
-        st.info(
-            "Para activar el asistente, agrega tu `OPENAI_API_KEY` en Streamlit Secrets.\n\n"
-            "Mientras tanto, el dashboard funciona normal."
-        )
+    if "chat_preventa_off" not in st.session_state:
+        st.session_state["chat_preventa_off"] = []
 
-    # 3) Chat
-    if "chat_preventa" not in st.session_state:
-        st.session_state["chat_preventa"] = []
-
-    for msg in st.session_state["chat_preventa"]:
+    for msg in st.session_state["chat_preventa_off"]:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
     user_q = st.chat_input("Ej: Snack 250g, VFFS, vida útil 6 meses. Cliente quiere bajar micras. ¿Qué ofrezco?")
 
     if user_q:
-        st.session_state["chat_preventa"].append({"role": "user", "content": user_q})
+        st.session_state["chat_preventa_off"].append({"role": "user", "content": user_q})
         with st.chat_message("user"):
             st.markdown(user_q)
 
         with st.chat_message("assistant"):
-            if not api_key:
-                st.markdown(
-                    "No puedo responder aún porque falta `OPENAI_API_KEY` en Secrets.\n\n"
-                    "Cuando la agregues, podrás usar el asistente."
-                )
-            else:
-                try:
-                    from openai import OpenAI
-                    client = OpenAI(api_key=api_key)
-
-                    system_instructions = """
-Eres un asistente de PREVENTA ESTRATÉGICO para empaque plástico flexible (bolsa/bobina).
-Reglas obligatorias:
-- Responde SOLO usando el contenido del manual que recibes abajo.
-- Si el manual no tiene información suficiente, NO inventes: pide datos faltantes del checklist.
-- Siempre ofrece dos opciones cuando sea viable:
-  A) Opción técnica segura (menor riesgo)
-  B) Opción optimizada costo (si es viable)
-- Formato:
-  1) Recomendación técnica base (estructura + micras + nivel barrera)
-  2) Alternativa optimizada costo (estructura + micras) [si aplica]
-  3) Margen de seguridad aplicado (y por qué)
-  4) Riesgo técnico (probables fallas/reclamos)
-  5) Impacto comercial (vida útil / reclamo / negociación)
-  6) Nota para producción (pruebas requeridas)
-  7) Datos faltantes (si aplica)
-  8) Evidencia del manual (qué parte sustenta la respuesta)
-"""
-
-                    # Para evitar prompts gigantes, recortamos el manual si es muy largo.
-                    # (Esto mejora estabilidad y costos). Ajusta si tu manual crece mucho.
-                    MAX_CHARS = 25000
-                    manual_for_prompt = manual_texto[:MAX_CHARS]
-
-                    resp = client.responses.create(
-                        model="gpt-4.1-mini",
-                        input=[
-                            {"role": "system", "content": system_instructions},
-                            {"role": "user", "content": f"MANUAL:\n{manual_for_prompt}\n\nPREGUNTA:\n{user_q}"},
-                        ],
-                    )
-
-                    answer = resp.output_text
-                    st.markdown(answer)
-                    st.session_state["chat_preventa"].append({"role": "assistant", "content": answer})
-
-                except Exception as e:
-                    st.error("No se pudo conectar a OpenAI. Revisa tu API Key (puede estar inválida o sin billing).")
-                    st.exception(e)
+            answer = construir_respuesta_preventa(manual_text, user_q)
+            st.markdown(answer)
+            st.session_state["chat_preventa_off"].append({"role": "assistant", "content": answer})
