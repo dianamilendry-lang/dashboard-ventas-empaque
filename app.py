@@ -119,18 +119,58 @@ with tab1:
 # -------- TAB 2 --------
 with tab2:
     if "df" in st.session_state:
-        df = st.session_state["df"]
-        total_actual = df["actual_kg"].sum()
-        total_budget = df["budget_kg"].sum()
-        total_pct = (total_actual/total_budget*100) if total_budget>0 else 0
+        df = st.session_state["df"].copy()
 
-        c1,c2,c3 = st.columns(3)
-        c1.metric("Actual KG", f"{total_actual:,.0f}")
-        c2.metric("Budget KG", f"{total_budget:,.0f}")
-        c3.metric("% Cumplimiento", f"{total_pct:.1f}%")
-
+        # 1) Resumen mensual
         by_mes = df.groupby("mes", as_index=False)[["actual_kg","budget_kg"]].sum()
-        st.plotly_chart(px.line(by_mes, x="mes", y=["actual_kg","budget_kg"], markers=True), use_container_width=True)
+
+        # orden correcto de meses
+        by_mes["mes"] = pd.Categorical(by_mes["mes"], categories=MESES_ORDEN, ordered=True)
+        by_mes = by_mes.sort_values("mes")
+
+        # 2) Meses "reportados": donde ya hay ventas cargadas (>0)
+        by_mes["reportado"] = by_mes["actual_kg"] > 0
+        meses_reportados = by_mes[by_mes["reportado"]]["mes"].tolist()
+
+        # Si todavía no hay meses con ventas > 0, evita división
+        if len(meses_reportados) == 0:
+            st.warning("Aún no hay meses con ventas cargadas (actual_kg > 0).")
+            st.dataframe(by_mes)
+            st.stop()
+
+        # 3) KPIs YTD (solo meses reportados)
+        ytd = by_mes[by_mes["reportado"]].copy()
+        total_actual = float(ytd["actual_kg"].sum())
+        total_budget = float(ytd["budget_kg"].sum())
+        total_var = total_actual - total_budget
+        total_pct = (total_actual / total_budget * 100) if total_budget > 0 else 0.0
+
+        # 4) KPIs Full Year (opcional, referencia)
+        fy_actual = float(by_mes["actual_kg"].sum())
+        fy_budget = float(by_mes["budget_kg"].sum())
+        fy_pct = (fy_actual / fy_budget * 100) if fy_budget > 0 else 0.0
+
+        st.caption(f"Meses reportados (ventas cargadas): {', '.join(meses_reportados)}")
+
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("Actual (KG) — YTD", f"{total_actual:,.0f}")
+        c2.metric("Budget (KG) — YTD", f"{total_budget:,.0f}")
+        c3.metric("Varianza (KG) — YTD", f"{total_var:,.0f}")
+        c4.metric("% Cumplimiento — YTD", f"{total_pct:.1f}%")
+
+        with st.expander("Ver referencia anual (Full Year)"):
+            st.write(f"Actual FY: {fy_actual:,.0f} KG")
+            st.write(f"Budget FY: {fy_budget:,.0f} KG")
+            st.write(f"% Cumplimiento FY: {fy_pct:.1f}%")
+
+        # 5) Gráfica: solo meses reportados (para que no “aplane”)
+        by_mes_ytd = by_mes[by_mes["reportado"]].copy()
+
+        st.plotly_chart(
+            px.line(by_mes_ytd, x="mes", y=["actual_kg","budget_kg"], markers=True),
+            use_container_width=True
+        )
+
     else:
         st.warning("Carga datos primero")
 
