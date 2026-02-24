@@ -48,36 +48,46 @@ def gemini_client():
 @st.cache_data(show_spinner=False)
 def pick_gemini_model():
     """
-    Detecta un modelo válido disponible para tu API key.
-    Prioriza modelos rápidos tipo Flash.
+    Elige un modelo disponible que soporte generateContent.
+    Prioriza modelos Flash / Preview recientes.
     """
     client = gemini_client()
-
-    # Lista tus modelos disponibles (esto usa tu key real)
     models = client.models.list()
 
-    # Prioridad (si existen)
-    prefer = [
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
+    # Candidatos recomendados (más nuevos primero)
+    preferred = [
+        "gemini-3-flash-preview",
+        "gemini-3-pro-preview",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
     ]
 
-    # Convierte a lista de IDs (según google-genai, normalmente vienen como 'models/...')
-    ids = []
+    available = []
     for m in models:
-        # m.name suele venir como 'models/xxxx'
-        if hasattr(m, "name") and m.name:
-            ids.append(m.name.replace("models/", ""))
+        name = getattr(m, "name", "")
+        if not name:
+            continue
+        model_id = name.replace("models/", "")
 
-    # 1) intenta por preferencia
-    for p in prefer:
-        if p in ids:
+        # Revisa acciones soportadas si el SDK lo trae
+        actions = getattr(m, "supported_actions", None) or getattr(m, "supportedActions", None)
+        if actions and ("generateContent" not in actions):
+            continue
+
+        available.append(model_id)
+
+    # 1) por preferencia
+    for p in preferred:
+        if p in available:
             return p
 
-    # 2) si no, usa el primero que exista
-    return ids[0] if ids else None
+    # 2) fallback: cualquier modelo que parezca texto y funcione
+    for mid in available:
+        if "flash" in mid or "pro" in mid:
+            return mid
+
+    return available[0] if available else None
 
 
 def gemini_generate(prompt: str) -> str:
@@ -85,7 +95,7 @@ def gemini_generate(prompt: str) -> str:
         client = gemini_client()
         model_id = pick_gemini_model()
         if not model_id:
-            return "❌ No encontré modelos disponibles para esta API key (ListModels vacío)."
+            return "❌ No encontré modelos disponibles con generateContent para esta API key."
 
         resp = client.models.generate_content(
             model=model_id,
