@@ -55,25 +55,27 @@ def gemini_generate(prompt):
 
 # ===================== RAG MANUAL =====================
 
-@st.cache_data
-def load_manual():
-    reader = PdfReader(MANUAL_PATH)
-    return "\n".join([(p.extract_text() or "") for p in reader.pages])
+MANUAL_DIR = "manual_tecnico"
 
-def tokenize(text):
-    text = re.sub(r"[^a-zA-Z0-9áéíóúñ ]", " ", text.lower())
-    return set(text.split())
+@st.cache_data(show_spinner=False)
+def find_manual_pdf():
+    # Busca cualquier PDF dentro de manual_tecnico/
+    if not os.path.isdir(MANUAL_DIR):
+        return None
+    pdfs = [f for f in os.listdir(MANUAL_DIR) if f.lower().endswith(".pdf")]
+    if not pdfs:
+        return None
+    # si hay varios, toma el primero (puedes ordenar)
+    pdfs.sort()
+    return os.path.join(MANUAL_DIR, pdfs[0])
 
-def retrieve_chunks(manual_text, query):
-    chunks = manual_text.split("\n\n")
-    q = tokenize(query)
-    scored = []
-    for c in chunks:
-        score = len(q.intersection(tokenize(c)))
-        if score > 0:
-            scored.append((score, c))
-    scored.sort(reverse=True)
-    return [c for _, c in scored[:4]]
+@st.cache_data(show_spinner=False)
+def load_manual_text(pdf_path: str) -> str:
+    reader = PdfReader(pdf_path)
+    txt = []
+    for p in reader.pages:
+        txt.append(p.extract_text() or "")
+    return "\n".join(txt).strip()
 
 # ===================== NORMALIZACIÓN =====================
 
@@ -185,17 +187,27 @@ No inventes cifras.
 
 # -------- TAB 4 --------
 with tab4:
-    manual = load_manual()
+    st.subheader("IA Técnica Preventa")
+
+    pdf_path = find_manual_pdf()
+    if not pdf_path:
+        st.warning("No encuentro ningún PDF en la carpeta manual_tecnico/. Súbelo al repo en manual_tecnico/")
+        st.stop()
+
+    st.caption(f"Manual detectado: `{pdf_path}`")
+
+    manual = load_manual_text(pdf_path)
+    if not manual:
+        st.warning("Pude abrir el PDF, pero no pude extraer texto. Si es escaneado, expórtalo como PDF con texto.")
+        st.stop()
 
     pregunta = st.chat_input("Ej: Café 500g, VFFS, vida útil 12 meses.")
+    ...
+ 
+    st.write("Contenido raíz:", os.listdir("."))
+if os.path.isdir("manual_tecnico"):
+    st.write("Contenido manual_tecnico:", os.listdir("manual_tecnico"))
 
-    if pregunta:
-        with st.chat_message("user"):
-            st.markdown(pregunta)
-
-        context = retrieve_chunks(manual, pregunta)
-
-        prompt = f"""
 Eres ingeniero preventa en empaque flexible.
 
 Responde SOLO usando el CONTEXTO.
