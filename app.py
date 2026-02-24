@@ -1,4 +1,5 @@
-import os, re
+import os
+import re
 import pandas as pd
 import streamlit as st
 import plotly.express as px
@@ -9,9 +10,33 @@ st.set_page_config(page_title="Dashboard + IA Generativa", layout="wide")
 
 MANUAL_PATH = os.path.join("manual_tecnico", "Manual_tecnico_preventa.pdf")
 
-# =========================
-# FUNCIONES IA (Gemini)
-# =========================
+MESES_ORDEN = [
+    "Enero","Febrero","Marzo","Abril","Mayo","Junio",
+    "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"
+]
+
+MESES_VENTAS = {
+    "Enero": "Ene_KG",
+    "Febrero": "Feb_KG",
+    "Marzo": "Mar_KG",
+    "Abril": "Abr_KG",
+    "Mayo": "May_KG",
+    "Junio": "Jun_KG",
+    "Julio": "Jul_KG",
+    "Agosto": "Ago_KG",
+    "Septiembre": "Sep_KG",
+    "Octubre": "Oct_KG",
+    "Noviembre": "Nov_KG",
+    "Diciembre": "Dic_KG",
+}
+
+MESES_PRES = {
+    "Enero": "ENE", "Febrero": "FEB", "Marzo": "MAR", "Abril": "ABR",
+    "Mayo": "MAY", "Junio": "JUN", "Julio": "JUL", "Agosto": "AGO",
+    "Septiembre": "SEP", "Octubre": "OCT", "Noviembre": "NOV", "Diciembre": "DIC",
+}
+
+# ===================== GEMINI =====================
 
 def gemini_client():
     api_key = st.secrets.get("GEMINI_API_KEY", None)
@@ -28,9 +53,7 @@ def gemini_generate(prompt):
     )
     return resp.text
 
-# =========================
-# RAG SIMPLE PARA MANUAL
-# =========================
+# ===================== RAG MANUAL =====================
 
 @st.cache_data
 def load_manual():
@@ -52,22 +75,29 @@ def retrieve_chunks(manual_text, query):
     scored.sort(reverse=True)
     return [c for _, c in scored[:4]]
 
-# =========================
-# DASHBOARD HELPERS
-# =========================
+# ===================== NORMALIZACIÓN =====================
 
-def kpis(df):
-    actual = df["actual_kg"].sum()
-    budget = df["budget_kg"].sum()
-    var = actual - budget
-    pct = (actual/budget*100) if budget > 0 else 0
-    return actual, budget, var, pct
+def normalizar_ventas(df):
+    out = []
+    for mes, col in MESES_VENTAS.items():
+        tmp = df[["ItemCode"]].copy()
+        tmp["mes"] = mes
+        tmp["actual_kg"] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        out.append(tmp)
+    return pd.concat(out)
 
-# =========================
-# UI
-# =========================
+def normalizar_pres(df):
+    out = []
+    for mes, col in MESES_PRES.items():
+        tmp = df[["ItemCode"]].copy()
+        tmp["mes"] = mes
+        tmp["budget_kg"] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+        out.append(tmp)
+    return pd.concat(out)
 
-st.title("📊 Dashboard + IA Generativa")
+# ===================== UI =====================
+
+st.title("📊 Dashboard Mensual + IA Generativa")
 
 tab1, tab2, tab3, tab4 = st.tabs([
     "1) Cargar Excel",
@@ -76,13 +106,10 @@ tab1, tab2, tab3, tab4 = st.tabs([
     "4) IA Técnica Preventa"
 ])
 
-# ====================================
-# TAB 1 — CARGA
-# ====================================
-
+# -------- TAB 1 --------
 with tab1:
-    ventas_file = st.file_uploader("Reporte de Ventas (.xlsx)", type=["xlsx"])
-    pres_file = st.file_uploader("Presupuesto (.xlsx)", type=["xlsx"])
+    ventas_file = st.file_uploader("Reporte Ventas mensual (.xlsx)", type=["xlsx"])
+    pres_file = st.file_uploader("Presupuesto mensual (.xlsx)", type=["xlsx"])
 
     if st.button("Procesar"):
         if not ventas_file or not pres_file:
@@ -91,75 +118,76 @@ with tab1:
             dfv = pd.read_excel(ventas_file)
             dfp = pd.read_excel(pres_file)
 
-            dfv["actual_kg"] = pd.to_numeric(dfv["KG"], errors="coerce").fillna(0)
-            dfp["budget_kg"] = pd.to_numeric(dfp["KG"], errors="coerce").fillna(0)
+            ventas_long = normalizar_ventas(dfv)
+            pres_long = normalizar_pres(dfp)
 
-            df = dfv.merge(dfp, on="ItemCode", how="left")
+            df = ventas_long.merge(pres_long, on=["ItemCode","mes"], how="left")
             df["budget_kg"] = df["budget_kg"].fillna(0)
+            df["var_kg"] = df["actual_kg"] - df["budget_kg"]
+            df["cumpl_pct"] = (df["actual_kg"]/df["budget_kg"]).replace([float("inf")],0).fillna(0)*100
 
             st.session_state["df"] = df
-            st.success("Datos cargados.")
+            st.success("Datos procesados.")
 
-# ====================================
-# TAB 2 — DASHBOARD
-# ====================================
-
+# -------- TAB 2 --------
 with tab2:
     if "df" not in st.session_state:
-        st.warning("Carga archivos primero.")
+        st.warning("Carga datos primero.")
     else:
         df = st.session_state["df"]
-        actual, budget, var, pct = kpis(df)
+
+        total_actual = df["actual_kg"].sum()
+        total_budget = df["budget_kg"].sum()
+        total_var = total_actual - total_budget
+        total_pct = (total_actual/total_budget*100) if total_budget>0 else 0
 
         c1,c2,c3,c4 = st.columns(4)
-        c1.metric("Actual KG", f"{actual:,.0f}")
-        c2.metric("Budget KG", f"{budget:,.0f}")
-        c3.metric("Varianza", f"{var:,.0f}")
-        c4.metric("% Cumplimiento", f"{pct:.1f}%")
+        c1.metric("Actual KG", f"{total_actual:,.0f}")
+        c2.metric("Budget KG", f"{total_budget:,.0f}")
+        c3.metric("Varianza", f"{total_var:,.0f}")
+        c4.metric("% Cumplimiento", f"{total_pct:.1f}%")
 
-# ====================================
-# TAB 3 — IA DEL DASHBOARD
-# ====================================
+        by_mes = df.groupby("mes", as_index=False)[["actual_kg","budget_kg"]].sum()
+        by_mes["mes"] = pd.Categorical(by_mes["mes"], categories=MESES_ORDEN, ordered=True)
+        by_mes = by_mes.sort_values("mes")
 
+        st.plotly_chart(
+            px.line(by_mes, x="mes", y=["actual_kg","budget_kg"], markers=True),
+            use_container_width=True
+        )
+
+# -------- TAB 3 --------
 with tab3:
     if "df" not in st.session_state:
         st.warning("Carga datos primero.")
     else:
         df = st.session_state["df"]
-        actual, budget, var, pct = kpis(df)
+
+        resumen = df.groupby("mes")[["actual_kg","budget_kg","var_kg"]].sum().to_string()
 
         if st.button("Generar Análisis Ejecutivo con IA"):
             prompt = f"""
 Eres analista financiero industrial.
-Usa SOLO los siguientes datos:
 
-Actual KG: {actual}
-Budget KG: {budget}
-Varianza: {var}
-Cumplimiento %: {pct}
+Usa SOLO los datos siguientes:
+
+{resumen}
 
 Entrega:
 1) Resumen ejecutivo
-2) Conclusiones
+2) Conclusiones clave
 3) Recomendaciones comerciales
 4) Riesgos
-No inventes datos.
+No inventes cifras.
 """
             response = gemini_generate(prompt)
             st.markdown(response)
 
-# ====================================
-# TAB 4 — IA TÉCNICA PREVENTA
-# ====================================
-
+# -------- TAB 4 --------
 with tab4:
-    if not os.path.exists(MANUAL_PATH):
-        st.error("Manual no encontrado en repo.")
-        st.stop()
-
     manual = load_manual()
 
-    pregunta = st.chat_input("Ej: Snack 250g, VFFS, vida útil 6 meses.")
+    pregunta = st.chat_input("Ej: Café 500g, VFFS, vida útil 12 meses.")
 
     if pregunta:
         with st.chat_message("user"):
@@ -170,8 +198,9 @@ with tab4:
         prompt = f"""
 Eres ingeniero preventa en empaque flexible.
 
-Responde SOLO usando el CONTEXTO del manual.
+Responde SOLO usando el CONTEXTO.
 Si falta información, pide datos faltantes.
+
 Entrega:
 1) Opción A segura
 2) Opción B optimizada costo
