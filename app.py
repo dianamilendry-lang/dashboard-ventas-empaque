@@ -535,14 +535,14 @@ with tab3:
 
     # --- API KEY ---
     api_key = None
-    try:
-        api_key = st.secrets.get("OPENAI_API_KEY", None)
-    except Exception:
-        api_key = os.environ.get("OPENAI_API_KEY")
+try:
+    api_key = st.secrets["OPENAI_API_KEY"]
+except Exception:
+    api_key = os.environ.get("OPENAI_API_KEY")
 
-    if not api_key:
-        st.warning("Configura OPENAI_API_KEY en Streamlit Secrets para activar el asistente.")
-        st.stop()
+if not api_key or api_key.strip() in ["TU_API_KEY", ""]:
+    st.error("OPENAI_API_KEY no está configurada (o está en placeholder). Ve a Streamlit Secrets y pega tu key real.")
+    st.stop()
 
     # --- Vector Store ID permanente (Secrets) ---
     vs_secret = None
