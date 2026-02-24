@@ -199,7 +199,7 @@ total_actual = df_activos["actual_kg"].sum()
 total_budget = df_activos["budget_kg"].sum()
 total_var = total_actual - total_budget
 total_pct = (total_actual / total_budget * 100) if total_budget > 0 else 0
-
+by_mes = df_activos.groupby("mes", as_index=False)[["actual_kg","budget_kg"]].sum()
         # 4) KPIs Full Year (opcional, referencia)
         fy_actual = float(by_mes["actual_kg"].sum())
         fy_budget = float(by_mes["budget_kg"].sum())
