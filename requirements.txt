@@ -3,3 +3,4 @@ pandas
 openpyxl
 plotly
 PyPDF2
+google-genai
