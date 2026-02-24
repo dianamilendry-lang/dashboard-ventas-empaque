@@ -45,16 +45,54 @@ def gemini_client():
         st.stop()
     return genai.Client(api_key=api_key)
 
+@st.cache_data(show_spinner=False)
+def pick_gemini_model():
+    """
+    Detecta un modelo válido disponible para tu API key.
+    Prioriza modelos rápidos tipo Flash.
+    """
+    client = gemini_client()
+
+    # Lista tus modelos disponibles (esto usa tu key real)
+    models = client.models.list()
+
+    # Prioridad (si existen)
+    prefer = [
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+    ]
+
+    # Convierte a lista de IDs (según google-genai, normalmente vienen como 'models/...')
+    ids = []
+    for m in models:
+        # m.name suele venir como 'models/xxxx'
+        if hasattr(m, "name") and m.name:
+            ids.append(m.name.replace("models/", ""))
+
+    # 1) intenta por preferencia
+    for p in prefer:
+        if p in ids:
+            return p
+
+    # 2) si no, usa el primero que exista
+    return ids[0] if ids else None
+
+
 def gemini_generate(prompt: str) -> str:
     try:
         client = gemini_client()
+        model_id = pick_gemini_model()
+        if not model_id:
+            return "❌ No encontré modelos disponibles para esta API key (ListModels vacío)."
+
         resp = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model=model_id,
             contents=prompt
         )
         return resp.text or "(Sin respuesta)"
     except Exception as e:
-        # Muestra error real en Streamlit para depurar
         return f"❌ Error llamando a Gemini: {type(e).__name__} — {e}"
 
 # ===================== MANUAL =====================
