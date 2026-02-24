@@ -2,5 +2,5 @@ streamlit
 pandas
 openpyxl
 plotly
-openai
+openai>=1.40.0
 PyPDF2
