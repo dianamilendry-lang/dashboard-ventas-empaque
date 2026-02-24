@@ -192,10 +192,13 @@ with tab2:
 
         # 3) KPIs YTD (solo meses reportados)
         ytd = by_mes[by_mes["reportado"]].copy()
-        total_actual = float(ytd["actual_kg"].sum())
-        total_budget = float(ytd["budget_kg"].sum())
-        total_var = total_actual - total_budget
-        total_pct = (total_actual / total_budget * 100) if total_budget > 0 else 0.0
+# Solo meses con datos reales cargados
+df_activos = df[df["actual_kg"] > 0]
+
+total_actual = df_activos["actual_kg"].sum()
+total_budget = df_activos["budget_kg"].sum()
+total_var = total_actual - total_budget
+total_pct = (total_actual / total_budget * 100) if total_budget > 0 else 0
 
         # 4) KPIs Full Year (opcional, referencia)
         fy_actual = float(by_mes["actual_kg"].sum())
