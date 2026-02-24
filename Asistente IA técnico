@@ -299,6 +299,3 @@ Reglas:
                     except Exception as e:
                         st.error("Error llamando a OpenAI. Revisa API key, vector store y permisos.")
                         st.exception(e)
-
-vector_store_id
-
