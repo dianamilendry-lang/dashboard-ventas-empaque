@@ -1,45 +1,25 @@
-# app.py
-# Dashboard Mensual + IA Generativa (Gemini) + Asistente Técnico Preventa (RAG simple sin vector DB)
-#
-# ✅ NO usa reportlab (evita ModuleNotFoundError)
-# ✅ Soporta Excel mensual (ventas/budget) aunque solo vengan 1–2 meses con datos
-# ✅ IA del Dashboard (conclusiones + recomendaciones) usando Gemini
-# ✅ Forecast & Riesgo (sin librerías extra)
-# ✅ Asistente técnico basado en PDF del manual (RAG simple por “chunks” + scoring)
-#
-# Requisitos (requirements.txt):
-# streamlit
-# pandas
-# openpyxl
-# plotly
-# PyPDF2
-# google-genai
-
 import os
 import re
-import math
-import textwrap
 from datetime import datetime
-
 import pandas as pd
 import streamlit as st
 import plotly.express as px
 from PyPDF2 import PdfReader
-
-# Google Gen AI SDK
 from google import genai
-from google.genai.types import HttpOptions
 
-# =========================
-# CONFIG
-# =========================
+# ========= PDF export (reportlab) =========
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.pagesizes import LETTER
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib import colors
+
+
+# ===================== CONFIG =====================
 st.set_page_config(page_title="Dashboard Mensual + IA Generativa", layout="wide")
 
-APP_TITLE = "📊 Dashboard Mensual + IA Generativa"
-
 MESES_ORDEN = [
-    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
-    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"
+    "Enero","Febrero","Marzo","Abril","Mayo","Junio",
+    "Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"
 ]
 
 MESES_VENTAS = {
@@ -63,749 +43,656 @@ MESES_PRES = {
     "Septiembre": "SEP", "Octubre": "OCT", "Noviembre": "NOV", "Diciembre": "DIC",
 }
 
-# Carpeta recomendada en la repo:
-# manual_tecnico/Manual_tecnico_preventa.pdf
+# PDF del manual (según tu repo, lo tienes en la raíz)
+MANUAL_PATH_ROOT = "Manual_tecnico_preventa.pdf"
 MANUAL_DIR = "manual_tecnico"
-MANUAL_FALLBACK_ROOT_NAMES = [
-    "Manual_tecnico_preventa.pdf",
-    "manual_tecnico_preventa.pdf",
-    "Manual tecnico preventa.pdf",
-]
 
-# Modelos: por cambios frecuentes, intentamos una lista hasta que funcione.
-DEFAULT_MODEL_CANDIDATES = [
-    "gemini-2.5-flash",
-    "gemini-flash-latest",
-    "gemini-2.5-pro",
-]
 
-# =========================
-# UTIL: GEMINI
-# =========================
-def _get_google_api_key() -> str | None:
-    # Acepta varias llaves para que no se te rompa por naming
-    # Recomendado por Google: GOOGLE_API_KEY
-    return (
-        st.secrets.get("GOOGLE_API_KEY")
-        or st.secrets.get("GEMINI_API_KEY")
-        or os.environ.get("GOOGLE_API_KEY")
-        or os.environ.get("GEMINI_API_KEY")
-    )
-
-@st.cache_resource(show_spinner=False)
+# ===================== GEMINI =====================
 def gemini_client():
-    api_key = _get_google_api_key()
+    api_key = st.secrets.get("GEMINI_API_KEY", None)
     if not api_key:
-        return None
-    # api_version="v1" ayuda a evitar algunos errores v1beta en entornos.
-    return genai.Client(api_key=api_key, http_options=HttpOptions(api_version="v1"))
+        st.error("Falta GEMINI_API_KEY en Secrets (Streamlit Cloud).")
+        st.stop()
+    return genai.Client(api_key=api_key)
 
-def gemini_generate(prompt: str, model_preference: str | None = None) -> tuple[str | None, str | None]:
+
+@st.cache_data(show_spinner=False)
+def pick_gemini_model():
     """
-    Devuelve (texto, error). Si falla, texto=None y error con detalle.
+    Elige un modelo disponible para tu API Key.
+    Evita modelos retirados para usuarios nuevos.
     """
     client = gemini_client()
-    if client is None:
-        return None, "Falta GOOGLE_API_KEY (o GEMINI_API_KEY) en Streamlit Secrets."
+    models = client.models.list()
 
-    candidates = []
-    if model_preference:
-        candidates.append(model_preference.strip())
-    candidates.extend([m for m in DEFAULT_MODEL_CANDIDATES if m not in candidates])
+    preferred = [
+        "gemini-3-flash-preview",
+        "gemini-3-pro-preview",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+    ]
 
-    last_err = None
-    for model in candidates:
-        try:
-            resp = client.models.generate_content(
-                model=model,
-                contents=prompt,
-            )
-            txt = getattr(resp, "text", None)
-            if txt:
-                return txt, None
-            # fallback si viene en otro formato
-            return str(resp), None
-        except Exception as e:
-            last_err = f"{type(e).__name__}: {e}"
+    available = []
+    for m in models:
+        name = getattr(m, "name", "")
+        if not name:
+            continue
+        model_id = name.replace("models/", "")
 
-    return None, f"No pude generar respuesta con Gemini. Último error: {last_err}"
+        actions = getattr(m, "supported_actions", None) or getattr(m, "supportedActions", None)
+        if actions and ("generateContent" not in actions):
+            continue
+
+        available.append(model_id)
+
+    for p in preferred:
+        if p in available:
+            return p
+
+    # fallback razonable
+    for mid in available:
+        if "flash" in mid or "pro" in mid:
+            return mid
+
+    return available[0] if available else None
 
 
-# =========================
-# UTIL: MANUAL PDF (RAG simple)
-# =========================
+def gemini_generate(prompt: str) -> str:
+    try:
+        client = gemini_client()
+        model_id = pick_gemini_model()
+        if not model_id:
+            return "❌ No encontré modelos disponibles con generateContent para esta API key."
+        resp = client.models.generate_content(model=model_id, contents=prompt)
+        return resp.text or "(Sin respuesta)"
+    except Exception as e:
+        return f"❌ Error llamando a Gemini: {type(e).__name__} — {e}"
+
+
+# ===================== MANUAL (RAG simple) =====================
 @st.cache_data(show_spinner=False)
 def find_manual_pdf() -> str | None:
-    # 1) Busca en manual_tecnico/
+    # 1) raíz
+    if os.path.exists(MANUAL_PATH_ROOT):
+        return MANUAL_PATH_ROOT
+    # 2) carpeta
     if os.path.isdir(MANUAL_DIR):
         pdfs = [f for f in os.listdir(MANUAL_DIR) if f.lower().endswith(".pdf")]
-        pdfs.sort()
         if pdfs:
+            pdfs.sort()
             return os.path.join(MANUAL_DIR, pdfs[0])
-
-    # 2) Busca en raíz con nombres comunes
-    root_files = set(os.listdir("."))
-    for name in MANUAL_FALLBACK_ROOT_NAMES:
-        if name in root_files:
-            return name
-
-    # 3) Busca cualquier PDF en raíz
-    pdfs_root = [f for f in os.listdir(".") if f.lower().endswith(".pdf")]
-    pdfs_root.sort()
-    if pdfs_root:
-        return pdfs_root[0]
-
     return None
+
 
 @st.cache_data(show_spinner=False)
 def load_manual_text(pdf_path: str) -> str:
     reader = PdfReader(pdf_path)
-    parts = []
+    txt = []
     for p in reader.pages:
-        parts.append(p.extract_text() or "")
-    return "\n".join(parts).strip()
+        txt.append(p.extract_text() or "")
+    return "\n".join(txt).strip()
 
-def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 150) -> list[str]:
-    text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    if not text:
-        return []
+
+def tokenize(text: str) -> set:
+    text = re.sub(r"[^a-zA-Z0-9áéíóúñ ]", " ", text.lower())
+    text = re.sub(r"\s+", " ", text).strip()
+    return set([t for t in text.split(" ") if len(t) >= 3])
+
+
+@st.cache_data(show_spinner=False)
+def chunk_text(text: str, chunk_size: int = 1200, overlap: int = 200) -> list[str]:
+    text = re.sub(r"\n{3,}", "\n\n", text)
     chunks = []
     i = 0
-    n = len(text)
-    while i < n:
-        j = min(i + chunk_size, n)
-        chunk = text[i:j]
-        chunks.append(chunk.strip())
-        i = max(j - overlap, i + 1)
-    return [c for c in chunks if c]
+    while i < len(text):
+        chunks.append(text[i:i+chunk_size])
+        i += (chunk_size - overlap)
+    return chunks
 
-def _tokenize(s: str) -> list[str]:
-    s = s.lower()
-    s = re.sub(r"[^a-záéíóúñ0-9\s\-\/]", " ", s)
-    toks = [t for t in s.split() if len(t) >= 3]
-    return toks
 
-def retrieve_chunks(query: str, chunks: list[str], k: int = 5) -> list[tuple[float, str]]:
-    """
-    Scoring simple por overlap + bonus por frases.
-    """
-    q_tokens = _tokenize(query)
-    if not q_tokens or not chunks:
-        return []
-
-    q_set = set(q_tokens)
+def retrieve_chunks(chunks: list[str], query: str, top_k: int = 4) -> list[str]:
+    q = tokenize(query)
     scored = []
     for c in chunks:
-        c_tokens = _tokenize(c)
-        if not c_tokens:
-            continue
-        c_set = set(c_tokens)
-        overlap = len(q_set & c_set)
-        denom = math.sqrt(len(q_set) * len(c_set)) if (len(q_set) and len(c_set)) else 1.0
-        score = overlap / denom
-
-        # Bonus por coincidencias “clave”
-        bonus = 0.0
-        for phrase in ["vffs", "hffs", "zipper", "válvula", "valvula", "aluminio", "metpet", "pet", "pe", "bop", "sellado"]:
-            if phrase in query.lower() and phrase in c.lower():
-                bonus += 0.08
-        scored.append((score + bonus, c))
-
+        score = len(q.intersection(tokenize(c)))
+        if score > 0:
+            scored.append((score, c))
     scored.sort(key=lambda x: x[0], reverse=True)
-    return scored[:k]
-
-def short_context(query: str, manual_chunks: list[str], k: int = 5, max_chars: int = 6000) -> str:
-    top = retrieve_chunks(query, manual_chunks, k=k)
-    ctx = []
-    total = 0
-    for score, chunk in top:
-        piece = f"[EVIDENCIA score={score:.3f}]\n{chunk}\n"
-        if total + len(piece) > max_chars:
-            break
-        ctx.append(piece)
-        total += len(piece)
-    return "\n\n".join(ctx).strip()
+    return [c for _, c in scored[:top_k]]
 
 
-# =========================
-# UTIL: DATA NORMALIZATION
-# =========================
-def detect_months_with_data(df_ventas: pd.DataFrame) -> list[str]:
-    """
-    Detecta meses que realmente traen datos (no solo columnas vacías/0).
-    Si tu Excel mensual solo tiene 1–2 meses con números, el dashboard NO castigará el resto.
-    """
-    available = []
-    for mes, col in MESES_VENTAS.items():
-        if col not in df_ventas.columns:
-            continue
-        ser = pd.to_numeric(df_ventas[col], errors="coerce")
-        # “Hay datos” si existe al menos un valor no nulo y la suma absoluta > 0
-        if ser.notna().any() and float(ser.fillna(0).abs().sum()) > 0:
-            available.append(mes)
-    return available
-
-def normalizar_ventas(df: pd.DataFrame, meses_activos: list[str]) -> pd.DataFrame:
-    base_cols = []
-    for c in ["SlpName", "Código de cliente/proveedor", "Nombre de cliente", "ItemCode", "ItemName", "UM"]:
-        if c in df.columns:
-            base_cols.append(c)
-
+# ===================== DATA (mensual, Excel) =====================
+def normalizar_ventas(df: pd.DataFrame) -> pd.DataFrame:
     if "ItemCode" not in df.columns:
-        raise ValueError("Tu reporte de ventas debe tener la columna 'ItemCode'.")
-
+        raise ValueError("Ventas: falta columna 'ItemCode'.")
     out = []
-    for mes in meses_activos:
-        col = MESES_VENTAS[mes]
+    for mes, col in MESES_VENTAS.items():
         if col not in df.columns:
-            continue
-        tmp = df[base_cols].copy() if base_cols else df[["ItemCode"]].copy()
+            raise ValueError(f"Ventas: falta columna mensual '{col}'.")
+        tmp = df[["ItemCode"]].copy()
         tmp["mes"] = mes
         tmp["actual_kg"] = pd.to_numeric(df[col], errors="coerce").fillna(0)
         out.append(tmp)
+    long = pd.concat(out, ignore_index=True)
+    long["mes"] = pd.Categorical(long["mes"], categories=MESES_ORDEN, ordered=True)
+    return long
 
-    if not out:
-        # si no detectamos meses activos, intenta con TODOS los meses presentes en columnas (aunque sean 0)
-        for mes, col in MESES_VENTAS.items():
-            if col in df.columns:
-                tmp = df[base_cols].copy() if base_cols else df[["ItemCode"]].copy()
-                tmp["mes"] = mes
-                tmp["actual_kg"] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-                out.append(tmp)
 
-    return pd.concat(out, ignore_index=True)
-
-def normalizar_presupuesto(df: pd.DataFrame, meses_activos: list[str]) -> pd.DataFrame:
+def normalizar_pres(df: pd.DataFrame) -> pd.DataFrame:
     if "ItemCode" not in df.columns:
-        raise ValueError("Tu presupuesto debe tener la columna 'ItemCode'.")
-
+        raise ValueError("Presupuesto: falta columna 'ItemCode'.")
     out = []
-    for mes in meses_activos:
-        col = MESES_PRES.get(mes)
-        if not col:
-            continue
+    for mes, col in MESES_PRES.items():
         if col not in df.columns:
-            # si presupuesto no trae esa columna, asumimos 0 para ese mes
-            tmp = df[["ItemCode"]].copy()
-            tmp["mes"] = mes
-            tmp["budget_kg"] = 0.0
-            out.append(tmp)
-            continue
-
+            raise ValueError(f"Presupuesto: falta columna mensual '{col}'.")
         tmp = df[["ItemCode"]].copy()
         tmp["mes"] = mes
         tmp["budget_kg"] = pd.to_numeric(df[col], errors="coerce").fillna(0)
         out.append(tmp)
+    long = pd.concat(out, ignore_index=True)
+    long["mes"] = pd.Categorical(long["mes"], categories=MESES_ORDEN, ordered=True)
+    return long
 
-    return pd.concat(out, ignore_index=True)
 
-def build_df_final(dfv: pd.DataFrame, dfp: pd.DataFrame, anio: int | None = None) -> tuple[pd.DataFrame, list[str]]:
-    meses_activos = detect_months_with_data(dfv)
-
-    # Si el reporte viene “mensual” y solo incluye 1 mes, esto lo soporta.
-    # Si no detecta meses, igual intenta normalizar por columnas existentes.
-    ventas_long = normalizar_ventas(dfv, meses_activos if meses_activos else MESES_ORDEN)
-    pres_long = normalizar_presupuesto(dfp, meses_activos if meses_activos else MESES_ORDEN)
-
+def build_df_final(ventas_long: pd.DataFrame, pres_long: pd.DataFrame) -> pd.DataFrame:
     df = ventas_long.merge(pres_long, on=["ItemCode", "mes"], how="left")
     df["budget_kg"] = df["budget_kg"].fillna(0)
     df["var_kg"] = df["actual_kg"] - df["budget_kg"]
-    df["cumpl_pct"] = df.apply(lambda r: (r["actual_kg"] / r["budget_kg"] * 100) if r["budget_kg"] > 0 else 0.0, axis=1)
-
-    df["mes"] = pd.Categorical(df["mes"], categories=MESES_ORDEN, ordered=True)
-
-    if anio is None:
-        anio = datetime.now().year
-    df["anio"] = int(anio)
-
-    # meses “analizables”: los que detectamos con datos, si no, los que aparezcan
-    meses_analizables = meses_activos if meses_activos else sorted(df["mes"].dropna().astype(str).unique(), key=lambda m: MESES_ORDEN.index(m))
-    return df, meses_analizables
+    df["cumpl_pct"] = (df["actual_kg"] / df["budget_kg"]).replace([float("inf")], 0).fillna(0) * 100
+    return df
 
 
-# =========================
-# FORECAST & RISK (sin deps extra)
-# =========================
-def simple_forecast(series_by_month: pd.Series, steps: int = 3) -> pd.DataFrame:
+def meses_reportados(df: pd.DataFrame) -> list[str]:
+    by_mes = df.groupby("mes", as_index=False)["actual_kg"].sum()
+    by_mes["mes"] = pd.Categorical(by_mes["mes"], categories=MESES_ORDEN, ordered=True)
+    by_mes = by_mes.sort_values("mes")
+    return [str(m) for m in by_mes[by_mes["actual_kg"] > 0]["mes"].tolist()]
+
+
+def ytd_kpis(df: pd.DataFrame) -> dict:
     """
-    Forecast naive: promedio móvil de los últimos 2 meses con datos (>0).
-    Si solo hay 1 mes, replica ese valor.
+    KPIs sobre meses reportados (meses con actual_kg > 0), para no distorsionar % si solo hay 2 meses cargados.
     """
-    s = series_by_month.copy().astype(float)
-    s = s.reindex(MESES_ORDEN)
-    nonzero = [v for v in s.values if (v is not None and not pd.isna(v) and v > 0)]
-    if len(nonzero) >= 2:
-        base = sum(nonzero[-2:]) / 2
-    elif len(nonzero) == 1:
-        base = nonzero[-1]
-    else:
-        base = 0.0
+    by_mes = df.groupby("mes", as_index=False)[["actual_kg", "budget_kg"]].sum()
+    by_mes["mes"] = pd.Categorical(by_mes["mes"], categories=MESES_ORDEN, ordered=True)
+    by_mes = by_mes.sort_values("mes")
+    act = by_mes[by_mes["actual_kg"] > 0].copy()
+    if act.empty:
+        return {"actual": 0.0, "budget": 0.0, "var": 0.0, "pct": 0.0, "meses": []}
+    actual = float(act["actual_kg"].sum())
+    budget = float(act["budget_kg"].sum())
+    var = actual - budget
+    pct = (actual / budget * 100) if budget > 0 else 0.0
+    meses = [str(m) for m in act["mes"].tolist()]
+    return {"actual": actual, "budget": budget, "var": var, "pct": pct, "meses": meses}
 
-    # próximo mes después del último mes con data
-    last_idx = None
-    for i, m in enumerate(MESES_ORDEN):
-        v = s.loc[m]
-        if (v is not None) and (not pd.isna(v)) and (v > 0):
-            last_idx = i
-    if last_idx is None:
-        last_idx = -1
 
-    rows = []
-    for k in range(1, steps + 1):
-        idx = last_idx + k
-        if idx >= len(MESES_ORDEN):
-            mes = f"Mes+{k}"
-        else:
-            mes = MESES_ORDEN[idx]
-        rows.append({"mes": mes, "forecast_actual_kg": base})
-    return pd.DataFrame(rows)
+def full_year_kpis(df: pd.DataFrame) -> dict:
+    actual = float(df["actual_kg"].sum())
+    budget = float(df["budget_kg"].sum())
+    var = actual - budget
+    pct = (actual / budget * 100) if budget > 0 else 0.0
+    return {"actual": actual, "budget": budget, "var": var, "pct": pct}
 
-def risk_summary(df: pd.DataFrame, meses_usados: list[str]) -> dict:
+
+def forecast_scenarios(df: pd.DataFrame) -> dict | None:
     """
-    Genera riesgos ejecutivos simples:
-    - Calidad de datos (meses sin ventas)
-    - Underperformance vs budget
-    - Concentración por vendedor/cliente (si existen columnas)
+    Forecast anual simple (3 escenarios) basado en meses reportados.
+    Devuelve dict con cierre estimado anual en KG para conservador/tendencial/optimista.
     """
-    dff = df.copy()
-    dff["mes_str"] = dff["mes"].astype(str)
-    dff = dff[dff["mes_str"].isin(meses_usados)]
+    by_mes = df.groupby("mes", as_index=False)["actual_kg"].sum()
+    by_mes["mes"] = pd.Categorical(by_mes["mes"], categories=MESES_ORDEN, ordered=True)
+    by_mes = by_mes.sort_values("mes")
+    by_mes = by_mes[by_mes["actual_kg"] > 0].copy()
 
-    total_actual = float(dff["actual_kg"].sum())
-    total_budget = float(dff["budget_kg"].sum())
-    cumplimiento = (total_actual / total_budget * 100) if total_budget > 0 else 0.0
-    under = float((dff["var_kg"] < 0).sum()) / max(len(dff), 1)
+    if len(by_mes) < 2:
+        return None
 
-    # Meses con 0 actual dentro de los meses usados
-    by_mes = dff.groupby("mes_str", as_index=False)[["actual_kg", "budget_kg"]].sum()
-    meses_cero = by_mes[by_mes["actual_kg"] <= 0]["mes_str"].tolist()
+    meses_cargados = len(by_mes)
+    meses_restantes = 12 - meses_cargados
 
-    # Concentración por vendedor
-    conc_vend = None
-    if "SlpName" in dff.columns:
-        by_v = dff.groupby("SlpName", as_index=False)["actual_kg"].sum().sort_values("actual_kg", ascending=False)
-        if not by_v.empty and total_actual > 0:
-            top_share = float(by_v.iloc[0]["actual_kg"]) / total_actual * 100
-            conc_vend = {"top_vendedor": str(by_v.iloc[0]["SlpName"]), "top_share_pct": top_share}
+    # crecimiento promedio (% change medio)
+    growth = float(by_mes["actual_kg"].pct_change().replace([float("inf"), -float("inf")], 0).fillna(0).mean())
+    last = float(by_mes["actual_kg"].iloc[-1])
 
-    # Concentración por cliente
-    conc_cli = None
-    cli_col = None
-    for c in ["Nombre de cliente", "Código de cliente/proveedor"]:
-        if c in dff.columns:
-            cli_col = c
-            break
-    if cli_col:
-        by_c = dff.groupby(cli_col, as_index=False)["actual_kg"].sum().sort_values("actual_kg", ascending=False)
-        if not by_c.empty and total_actual > 0:
-            top_share = float(by_c.iloc[0]["actual_kg"]) / total_actual * 100
-            conc_cli = {"top_cliente": str(by_c.iloc[0][cli_col]), "top_share_pct": top_share, "col": cli_col}
+    ytd_actual = float(by_mes["actual_kg"].sum())
 
-    # “Score” simple 0–100
-    score = 0
-    score += 30 if len(meses_cero) > 0 else 0
-    score += 30 if cumplimiento < 90 else (10 if cumplimiento < 100 else 0)
-    score += 20 if (conc_vend and conc_vend["top_share_pct"] >= 70) else 0
-    score += 20 if (conc_cli and conc_cli["top_share_pct"] >= 70) else 0
-    score = min(score, 100)
+    # Tendencial: proyecta usando last*(1+growth)^t como aproximación de "run" futuro mensual promedio
+    # Simplificación ejecutiva: future_month_avg ~ last*(1+growth)
+    future_month_avg = max(0.0, last * (1 + growth))
+    tend_future = future_month_avg * meses_restantes
+    opt_future = (future_month_avg * 1.10) * meses_restantes
+    cons_future = (future_month_avg * 0.90) * meses_restantes
 
     return {
-        "cumplimiento_pct": cumplimiento,
-        "meses_cero": meses_cero,
-        "under_ratio": under,
-        "conc_vend": conc_vend,
-        "conc_cli": conc_cli,
-        "risk_score_0_100": score,
+        "meses_cargados": meses_cargados,
+        "growth_prom": growth,
+        "ytd_actual": ytd_actual,
+        "conservador": ytd_actual + cons_future,
+        "tendencial": ytd_actual + tend_future,
+        "optimista": ytd_actual + opt_future,
     }
 
 
-# =========================
-# UI
-# =========================
-st.title(APP_TITLE)
+def risk_score(df: pd.DataFrame, ytd: dict) -> dict:
+    """
+    Score de riesgo simple (0-6):
+    +2 si faltan >6 meses por reportar
+    +2 si volatilidad mensual alta
+    +2 si cumplimiento YTD < 90%
+    """
+    meses_cargados = len(ytd.get("meses", []))
+    missing = 12 - meses_cargados
+    pct_missing = missing / 12
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
-    "Cargar Excel",
-    "Dashboard",
-    "IA del Dashboard",
-    "Forecast & Riesgo",
-    "IA Técnica Preventa",
+    by_mes = df.groupby("mes")["actual_kg"].sum()
+    vol = float(by_mes.std()) if len(by_mes) > 1 else 0.0
+
+    score = 0
+    if pct_missing > 0.5:
+        score += 2
+    if vol > 50000:  # umbral genérico; ajústalo si quieres
+        score += 2
+    if ytd.get("pct", 0.0) < 90:
+        score += 2
+
+    if score <= 2:
+        level = "🟢 Bajo"
+    elif score <= 4:
+        level = "🟡 Medio"
+    else:
+        level = "🔴 Alto"
+
+    return {
+        "score": score,
+        "level": level,
+        "missing_months": missing,
+        "volatilidad": vol,
+    }
+
+
+# ===================== PDF REPORT =====================
+def make_executive_pdf(
+    file_path: str,
+    titulo: str,
+    kpi_ytd: dict,
+    kpi_fy: dict,
+    forecast: dict | None,
+    riesgo: dict,
+    analisis_ia: str,
+    tabla_mensual: pd.DataFrame
+):
+    styles = getSampleStyleSheet()
+    doc = SimpleDocTemplate(file_path, pagesize=LETTER)
+    elements = []
+
+    elements.append(Paragraph(titulo, styles["Heading1"]))
+    elements.append(Paragraph(f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles["Normal"]))
+    elements.append(Spacer(1, 12))
+
+    elements.append(Paragraph("KPIs (Meses reportados - YTD)", styles["Heading2"]))
+    ytd_tbl = [
+        ["Actual (KG)", f"{kpi_ytd['actual']:,.0f}"],
+        ["Budget (KG)", f"{kpi_ytd['budget']:,.0f}"],
+        ["Varianza (KG)", f"{kpi_ytd['var']:,.0f}"],
+        ["% Cumplimiento", f"{kpi_ytd['pct']:.1f}%"],
+        ["Meses reportados", ", ".join(kpi_ytd["meses"]) if kpi_ytd["meses"] else "N/A"],
+    ]
+    t = Table(ytd_tbl, hAlign="LEFT")
+    t.setStyle(TableStyle([
+        ("GRID", (0,0), (-1,-1), 0.5, colors.grey),
+        ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
+        ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+        ("FONTSIZE", (0,0), (-1,-1), 10),
+        ("PADDING", (0,0), (-1,-1), 6),
+    ]))
+    elements.append(t)
+    elements.append(Spacer(1, 12))
+
+    elements.append(Paragraph("KPIs (Full Year - referencia)", styles["Heading2"]))
+    fy_tbl = [
+        ["Actual FY (KG)", f"{kpi_fy['actual']:,.0f}"],
+        ["Budget FY (KG)", f"{kpi_fy['budget']:,.0f}"],
+        ["Varianza FY (KG)", f"{kpi_fy['var']:,.0f}"],
+        ["% Cumplimiento FY", f"{kpi_fy['pct']:.1f}%"],
+    ]
+    t2 = Table(fy_tbl, hAlign="LEFT")
+    t2.setStyle(TableStyle([
+        ("GRID", (0,0), (-1,-1), 0.5, colors.grey),
+        ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+        ("FONTSIZE", (0,0), (-1,-1), 10),
+        ("PADDING", (0,0), (-1,-1), 6),
+    ]))
+    elements.append(t2)
+    elements.append(Spacer(1, 12))
+
+    elements.append(Paragraph("Forecast (Cierre anual estimado)", styles["Heading2"]))
+    if forecast:
+        f_tbl = [
+            ["Escenario", "Cierre estimado (KG)"],
+            ["Conservador", f"{forecast['conservador']:,.0f}"],
+            ["Tendencial", f"{forecast['tendencial']:,.0f}"],
+            ["Optimista", f"{forecast['optimista']:,.0f}"],
+        ]
+        tf = Table(f_tbl, hAlign="LEFT")
+        tf.setStyle(TableStyle([
+            ("GRID", (0,0), (-1,-1), 0.5, colors.grey),
+            ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
+            ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+            ("FONTSIZE", (0,0), (-1,-1), 10),
+            ("PADDING", (0,0), (-1,-1), 6),
+        ]))
+        elements.append(tf)
+    else:
+        elements.append(Paragraph("No hay suficientes meses para proyectar (se requieren al menos 2 meses reportados).", styles["Normal"]))
+    elements.append(Spacer(1, 12))
+
+    elements.append(Paragraph("Riesgo Comercial (Score)", styles["Heading2"]))
+    r_tbl = [
+        ["Nivel", riesgo["level"]],
+        ["Score (0-6)", str(riesgo["score"])],
+        ["Meses sin datos", str(riesgo["missing_months"])],
+        ["Volatilidad (std KG)", f"{riesgo['volatilidad']:,.0f}"],
+    ]
+    tr = Table(r_tbl, hAlign="LEFT")
+    tr.setStyle(TableStyle([
+        ("GRID", (0,0), (-1,-1), 0.5, colors.grey),
+        ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+        ("FONTSIZE", (0,0), (-1,-1), 10),
+        ("PADDING", (0,0), (-1,-1), 6),
+    ]))
+    elements.append(tr)
+    elements.append(Spacer(1, 12))
+
+    elements.append(Paragraph("Análisis Ejecutivo (IA Generativa)", styles["Heading2"]))
+    # Evita PDFs muy largos: truncar
+    max_chars = 5000
+    ia_text = (analisis_ia or "").strip()
+    if len(ia_text) > max_chars:
+        ia_text = ia_text[:max_chars] + "…"
+    elements.append(Paragraph(ia_text.replace("\n", "<br/>"), styles["Normal"]))
+    elements.append(Spacer(1, 12))
+
+    elements.append(Paragraph("Tabla mensual (resumen)", styles["Heading2"]))
+    tbl = tabla_mensual.copy()
+    # to list
+    rows = [["Mes", "Actual (KG)", "Budget (KG)", "Var (KG)", "% Cumpl"]]
+    for _, r in tbl.iterrows():
+        rows.append([str(r["mes"]), f"{r['actual_kg']:,.0f}", f"{r['budget_kg']:,.0f}", f"{r['var_kg']:,.0f}", f"{r['cumpl_pct']:.1f}%"])
+    tt = Table(rows, hAlign="LEFT")
+    tt.setStyle(TableStyle([
+        ("GRID", (0,0), (-1,-1), 0.5, colors.grey),
+        ("BACKGROUND", (0,0), (-1,0), colors.whitesmoke),
+        ("FONTNAME", (0,0), (-1,-1), "Helvetica"),
+        ("FONTSIZE", (0,0), (-1,-1), 9),
+        ("PADDING", (0,0), (-1,-1), 5),
+    ]))
+    elements.append(tt)
+
+    doc.build(elements)
+
+
+# ===================== UI =====================
+st.title("📊 Dashboard Mensual + IA Generativa (MBA)")
+
+tab1, tab2, tab3, tab4 = st.tabs([
+    "1) Cargar Excel",
+    "2) Dashboard",
+    "3) IA Ejecutiva + Forecast + Riesgo + PDF",
+    "4) IA Técnica Preventa (RAG Manual)"
 ])
 
-# -------------------------
-# TAB 1: CARGA
-# -------------------------
+# -------- TAB 1 --------
 with tab1:
-    st.subheader("1) Cargar archivos (mensual)")
-    colA, colB = st.columns(2)
+    st.subheader("Carga de datos mensuales (Excel)")
+    ventas_file = st.file_uploader("Reporte Ventas mensual (.xlsx)", type=["xlsx"], key="ventas")
+    pres_file = st.file_uploader("Presupuesto mensual (.xlsx)", type=["xlsx"], key="pres")
 
-    with colA:
-        ventas_file = st.file_uploader("Reporte de Ventas mensual (.xlsx)", type=["xlsx"], key="ventas_upl")
-    with colB:
-        pres_file = st.file_uploader("Presupuesto (.xlsx)", type=["xlsx"], key="pres_upl")
-
-    c1, c2 = st.columns([1, 2])
-    with c1:
-        anio = st.number_input("Año", value=datetime.now().year, step=1)
-
-    if st.button("Procesar", type="primary"):
+    if st.button("Procesar archivos"):
         if not ventas_file or not pres_file:
-            st.error("Sube ambos archivos: Ventas y Presupuesto.")
+            st.error("Sube ambos archivos (Ventas y Presupuesto).")
         else:
             try:
                 dfv = pd.read_excel(ventas_file)
                 dfp = pd.read_excel(pres_file)
 
-                df_final, meses_analizables = build_df_final(dfv, dfp, anio=int(anio))
+                ventas_long = normalizar_ventas(dfv)
+                pres_long = normalizar_pres(dfp)
+
+                df_final = build_df_final(ventas_long, pres_long)
                 st.session_state["df_final"] = df_final
-                st.session_state["meses_analizables"] = meses_analizables
 
-                st.success("✅ Datos procesados correctamente.")
-                st.info(f"Meses detectados con datos reales: {', '.join(meses_analizables) if meses_analizables else 'N/A'}")
-
-                with st.expander("Ver muestra (primeras filas)"):
-                    st.dataframe(df_final.head(30), use_container_width=True)
-
+                st.success("✅ Datos procesados. Ve a Dashboard e IA Ejecutiva.")
+                with st.expander("Ver muestra (df_final)"):
+                    st.dataframe(df_final.head(20), use_container_width=True)
             except Exception as e:
-                st.error(f"Error procesando archivos: {type(e).__name__}: {e}")
+                st.exception(e)
 
-    st.caption("Tip: si tu Excel mensual solo tiene 1–2 meses con números, este sistema calcula KPIs solo sobre esos meses (no penaliza meses futuros).")
-
-
-# -------------------------
-# SIDEBAR FILTROS (global)
-# -------------------------
-def sidebar_filters(df: pd.DataFrame, default_meses: list[str]):
-    st.sidebar.header("Filtros")
-
-    # Año
-    anios = sorted(df["anio"].dropna().unique().tolist())
-    anio_sel = st.sidebar.selectbox("Año", anios, index=len(anios) - 1 if anios else 0)
-    dff = df[df["anio"] == anio_sel].copy()
-
-    # Mes (por defecto: meses con data real)
-    meses_disp = [m for m in MESES_ORDEN if m in dff["mes"].astype(str).unique().tolist()]
-    default = [m for m in default_meses if m in meses_disp] or meses_disp
-    mes_sel = st.sidebar.multiselect("Mes (para análisis)", meses_disp, default=default)
-    if mes_sel:
-        dff = dff[dff["mes"].astype(str).isin(mes_sel)].copy()
-
-    # Vendedor (si existe)
-    if "SlpName" in dff.columns:
-        vend_disp = sorted([v for v in dff["SlpName"].dropna().unique().tolist()])
-        if vend_disp:
-            vend_sel = st.sidebar.multiselect("Vendedor", vend_disp, default=vend_disp)
-            if vend_sel:
-                dff = dff[dff["SlpName"].isin(vend_sel)].copy()
-
-    return dff, anio_sel, mes_sel
-
-
-# -------------------------
-# TAB 2: DASHBOARD
-# -------------------------
+# -------- TAB 2 --------
 with tab2:
-    st.subheader("2) Dashboard (cumplimiento vs presupuesto)")
+    st.subheader("Dashboard (cumplimiento vs presupuesto) — KPI sobre meses reportados")
+
     if "df_final" not in st.session_state:
-        st.warning("Primero carga y procesa tus Excel en la pestaña **Cargar Excel**.")
+        st.warning("Primero carga y procesa tus Excel en la pestaña 1.")
     else:
-        df0 = st.session_state["df_final"].copy()
-        meses_default = st.session_state.get("meses_analizables", [])
+        df = st.session_state["df_final"].copy()
 
-        dff, anio_sel, mes_sel = sidebar_filters(df0, meses_default)
+        # KPIs (YTD meses reportados)
+        ytd = ytd_kpis(df)
+        fy = full_year_kpis(df)
 
-        total_actual = float(dff["actual_kg"].sum())
-        total_budget = float(dff["budget_kg"].sum())
-        total_var = total_actual - total_budget
-        total_pct = (total_actual / total_budget * 100) if total_budget > 0 else 0.0
+        st.caption(f"Meses reportados (ventas > 0): {', '.join(ytd['meses']) if ytd['meses'] else 'Ninguno'}")
 
-        # KPIs
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Actual (KG)", f"{total_actual:,.0f}")
-        c2.metric("Budget (KG)", f"{total_budget:,.0f}")
-        c3.metric("Varianza (KG)", f"{total_var:,.0f}")
-        c4.metric("% Cumplimiento", f"{total_pct:.1f}%")
+        c1.metric("Actual YTD (KG)", f"{ytd['actual']:,.0f}")
+        c2.metric("Budget YTD (KG)", f"{ytd['budget']:,.0f}")
+        c3.metric("Varianza YTD (KG)", f"{ytd['var']:,.0f}")
+        c4.metric("% Cumplimiento YTD", f"{ytd['pct']:.1f}%")
 
-        st.markdown("### Tendencia mensual (Actual vs Budget)")
-        by_mes = dff.groupby(dff["mes"].astype(str), as_index=False)[["actual_kg", "budget_kg"]].sum()
-        by_mes.rename(columns={"mes": "mes"}, inplace=True)
+        with st.expander("Referencia Full Year (FY)"):
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("Actual FY (KG)", f"{fy['actual']:,.0f}")
+            d2.metric("Budget FY (KG)", f"{fy['budget']:,.0f}")
+            d3.metric("Var FY (KG)", f"{fy['var']:,.0f}")
+            d4.metric("% FY", f"{fy['pct']:.1f}%")
+
+        # Tendencia (solo meses reportados)
+        by_mes = (
+            df.groupby("mes", as_index=False)[["actual_kg","budget_kg"]].sum()
+        )
         by_mes["mes"] = pd.Categorical(by_mes["mes"], categories=MESES_ORDEN, ordered=True)
         by_mes = by_mes.sort_values("mes")
+        by_mes = by_mes[by_mes["actual_kg"] > 0].copy()
 
-        st.plotly_chart(
-            px.line(by_mes, x="mes", y=["actual_kg", "budget_kg"], markers=True),
-            use_container_width=True
-        )
-
-        # Cumplimiento por vendedor (si existe)
-        if "SlpName" in dff.columns and dff["SlpName"].notna().any():
-            st.markdown("### Cumplimiento por vendedor (%)")
-            by_vend = dff.groupby("SlpName", as_index=False)[["actual_kg", "budget_kg"]].sum()
-            by_vend["cumpl_pct"] = by_vend.apply(
-                lambda r: (r["actual_kg"] / r["budget_kg"] * 100) if r["budget_kg"] > 0 else 0.0,
-                axis=1
+        st.markdown("### Tendencia mensual (meses reportados)")
+        if by_mes.empty:
+            st.info("Aún no hay meses con ventas > 0.")
+        else:
+            st.plotly_chart(
+                px.line(by_mes, x="mes", y=["actual_kg","budget_kg"], markers=True),
+                use_container_width=True
             )
-            by_vend = by_vend.sort_values("cumpl_pct", ascending=False)
-            st.plotly_chart(px.bar(by_vend, x="SlpName", y="cumpl_pct"), use_container_width=True)
 
-        # Export de datos filtrados (sin librerías extra)
-        st.markdown("### Exportación")
-        csv_data = dff.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            "⬇️ Descargar datos filtrados (CSV)",
-            data=csv_data,
-            file_name=f"dashboard_filtrado_{anio_sel}.csv",
-            mime="text/csv"
-        )
-
-
-# -------------------------
-# TAB 3: IA DEL DASHBOARD
-# -------------------------
+# -------- TAB 3 --------
 with tab3:
-    st.subheader("3) IA del Dashboard (análisis ejecutivo)")
-    st.caption("Genera un informe SIN inventar cifras, usando solo agregados por mes del filtro actual.")
+    st.subheader("IA Ejecutiva + Forecast + Riesgo + Exportación PDF")
 
     if "df_final" not in st.session_state:
-        st.warning("Primero carga y procesa tus Excel en la pestaña **Cargar Excel**.")
+        st.warning("Carga datos primero en la pestaña 1.")
     else:
-        df0 = st.session_state["df_final"].copy()
-        meses_default = st.session_state.get("meses_analizables", [])
-        dff, anio_sel, mes_sel = sidebar_filters(df0, meses_default)
+        df = st.session_state["df_final"].copy()
+        ytd = ytd_kpis(df)
+        fy = full_year_kpis(df)
+        fc = forecast_scenarios(df)
+        riesgo = risk_score(df, ytd)
 
-        model_choice = st.selectbox("Modelo (si falla, prueba otro)", DEFAULT_MODEL_CANDIDATES, index=0)
+        st.caption(f"Modelo Gemini en uso: {pick_gemini_model()}")
 
-        by_mes = dff.groupby(dff["mes"].astype(str), as_index=False)[["actual_kg", "budget_kg", "var_kg"]].sum()
-        by_mes["mes"] = pd.Categorical(by_mes["mes"], categories=MESES_ORDEN, ordered=True)
-        by_mes = by_mes.sort_values("mes")
-
-        # tabla compacta para prompt
-        resumen_lines = []
-        for _, r in by_mes.iterrows():
-            m = str(r["mes"])
-            a = float(r["actual_kg"])
-            b = float(r["budget_kg"])
-            v = float(r["var_kg"])
-            pct = (a / b * 100) if b > 0 else 0.0
-            resumen_lines.append(f"- {m}: Actual={a:,.2f} kg | Budget={b:,.2f} kg | Var={v:,.2f} kg | Cumpl={pct:.1f}%")
-        resumen = "\n".join(resumen_lines)
-
-        total_actual = float(dff["actual_kg"].sum())
-        total_budget = float(dff["budget_kg"].sum())
-        total_pct = (total_actual / total_budget * 100) if total_budget > 0 else 0.0
-
-        if st.button("Generar análisis con IA", type="primary"):
-            prompt = f"""
-Eres consultor ejecutivo (MBA) en estrategia comercial e inteligencia de negocios para empaques flexibles.
-
-REGLAS:
-- Usa SOLO los datos provistos.
-- NO inventes cifras.
-- Si notas meses sin datos (0), interpreta como "aún no cargados" si el reporte es mensual.
-
-CONTEXTO:
-Año: {anio_sel}
-Meses analizados (filtro): {", ".join(mes_sel) if mes_sel else "N/A"}
-Total Actual: {total_actual:,.2f} kg
-Total Budget: {total_budget:,.2f} kg
-Cumplimiento total del periodo: {total_pct:.1f}%
-
-DATOS POR MES:
-{resumen}
-
-ENTREGA (en español, con bullets):
-1) Resumen ejecutivo (5 bullets)
-2) Conclusiones clave (máximo 7)
-3) Recomendaciones y toma de decisiones (máximo 10) separadas por: Comercial / Operación / Finanzas
-4) Riesgos (datos, demanda, mezcla, ejecución) y mitigaciones
-5) Próximos 30 días: plan de acción
-"""
-            ans, err = gemini_generate(prompt, model_preference=model_choice)
-            if err:
-                st.error("No se pudo generar el análisis. Revisa tu GOOGLE_API_KEY (o GEMINI_API_KEY) y el modelo.")
-                st.code(err)
-            else:
-                st.session_state["last_exec_report_md"] = ans
-                st.markdown(ans)
-
-                # Export ejecutivo como Markdown (descarga)
-                md_bytes = ans.encode("utf-8")
-                st.download_button(
-                    "⬇️ Descargar informe ejecutivo (MD)",
-                    data=md_bytes,
-                    file_name=f"informe_ejecutivo_{anio_sel}.md",
-                    mime="text/markdown"
-                )
-
-
-# -------------------------
-# TAB 4: FORECAST & RIESGO
-# -------------------------
-with tab4:
-    st.subheader("4) Forecast & Riesgo (nivel MBA)")
-    st.caption("Forecast simple + riesgos ejecutivos SIN librerías adicionales. (Puedes mejorar después con modelos avanzados).")
-
-    if "df_final" not in st.session_state:
-        st.warning("Primero carga y procesa tus Excel en la pestaña **Cargar Excel**.")
-    else:
-        df0 = st.session_state["df_final"].copy()
-        meses_default = st.session_state.get("meses_analizables", [])
-        dff, anio_sel, mes_sel = sidebar_filters(df0, meses_default)
-
-        # Serie mensual
-        by_mes = dff.groupby(dff["mes"].astype(str), as_index=True)["actual_kg"].sum()
-        by_mes = by_mes.reindex(MESES_ORDEN).fillna(0)
-
-        st.markdown("### Forecast (próximos 3 meses)")
-        fc = simple_forecast(by_mes, steps=3)
-        st.dataframe(fc, use_container_width=True)
-
-        st.plotly_chart(
-            px.bar(fc, x="mes", y="forecast_actual_kg"),
-            use_container_width=True
-        )
-
-        st.markdown("### Riesgos (resumen ejecutivo)")
-        rs = risk_summary(st.session_state["df_final"], mes_sel if mes_sel else meses_default)
+        # Tabla mensual resumen (para IA y PDF)
+        resumen_mes = df.groupby("mes", as_index=False)[["actual_kg","budget_kg","var_kg"]].sum()
+        resumen_mes["cumpl_pct"] = (resumen_mes["actual_kg"]/resumen_mes["budget_kg"]).replace([float("inf")],0).fillna(0)*100
+        resumen_mes["mes"] = pd.Categorical(resumen_mes["mes"], categories=MESES_ORDEN, ordered=True)
+        resumen_mes = resumen_mes.sort_values("mes")
 
         c1, c2, c3 = st.columns(3)
-        c1.metric("Riesgo (0–100)", f"{rs['risk_score_0_100']}")
-        c2.metric("Cumplimiento periodo", f"{rs['cumplimiento_pct']:.1f}%")
-        c3.metric("Ratio líneas bajo presupuesto", f"{rs['under_ratio']*100:.1f}%")
+        c1.metric("Riesgo", riesgo["level"])
+        if fc:
+            c2.metric("Forecast Tendencial (KG)", f"{fc['tendencial']:,.0f}")
+        else:
+            c2.metric("Forecast", "N/A (mín. 2 meses)")
+        c3.metric("Cumplimiento YTD", f"{ytd['pct']:.1f}%")
 
-        if rs["meses_cero"]:
-            st.warning(f"Meses sin ventas registradas dentro del filtro: {', '.join(rs['meses_cero'])}")
+        with st.expander("Ver resumen mensual"):
+            st.dataframe(resumen_mes, use_container_width=True)
 
-        if rs["conc_vend"]:
-            st.info(f"Concentración Vendedor: {rs['conc_vend']['top_vendedor']} = {rs['conc_vend']['top_share_pct']:.1f}% del volumen del periodo.")
+        st.markdown("### 🔮 Forecast (3 escenarios)")
+        if fc:
+            f1, f2, f3 = st.columns(3)
+            f1.metric("Conservador", f"{fc['conservador']:,.0f} KG")
+            f2.metric("Tendencial", f"{fc['tendencial']:,.0f} KG")
+            f3.metric("Optimista", f"{fc['optimista']:,.0f} KG")
+            st.caption(f"Crecimiento promedio mensual (aprox): {fc['growth_prom']*100:.1f}% | Meses cargados: {fc['meses_cargados']}")
+        else:
+            st.info("Se requieren al menos 2 meses reportados para forecast.")
 
-        if rs["conc_cli"]:
-            st.info(f"Concentración Cliente ({rs['conc_cli']['col']}): {rs['conc_cli']['top_cliente']} = {rs['conc_cli']['top_share_pct']:.1f}% del volumen del periodo.")
+        st.markdown("### ⚠️ Score de riesgo")
+        st.write(f"Nivel: {riesgo['level']} | Score: {riesgo['score']}/6 | Meses sin datos: {riesgo['missing_months']} | Volatilidad (std): {riesgo['volatilidad']:,.0f} KG")
 
-        st.markdown("### Export ejecutivo (resumen riesgos)")
-        risk_md = f"""# Riesgo Ejecutivo — {anio_sel}
+        st.markdown("### 🤖 Análisis ejecutivo con IA (solo con números del dashboard)")
+        if "analisis_ia" not in st.session_state:
+            st.session_state["analisis_ia"] = ""
 
-- Risk score (0–100): **{rs['risk_score_0_100']}**
-- Cumplimiento del periodo: **{rs['cumplimiento_pct']:.1f}%**
-- Meses sin ventas registradas (en filtro): **{', '.join(rs['meses_cero']) if rs['meses_cero'] else 'Ninguno'}**
-- Ratio de líneas bajo presupuesto: **{rs['under_ratio']*100:.1f}%**
+        if st.button("Generar análisis ejecutivo (IA)"):
+            prompt = f"""
+Eres consultor ejecutivo (industria empaque flexible).
+Reglas:
+- Usa SOLO los números proporcionados.
+- No inventes cifras.
+- Si falta información para una recomendación, pide el dato faltante.
+- Enfócate en acciones comerciales/operativas.
 
-## Concentración
-- Vendedor: {rs['conc_vend'] if rs['conc_vend'] else 'N/A'}
-- Cliente: {rs['conc_cli'] if rs['conc_cli'] else 'N/A'}
+KPIs YTD (meses reportados):
+- Actual: {ytd['actual']}
+- Budget: {ytd['budget']}
+- Var: {ytd['var']}
+- %: {ytd['pct']}
+- Meses reportados: {", ".join(ytd['meses']) if ytd['meses'] else "N/A"}
+
+KPIs Full Year (referencia):
+- Actual FY: {fy['actual']}
+- Budget FY: {fy['budget']}
+- Var FY: {fy['var']}
+- % FY: {fy['pct']}
+
+Resumen mensual (tabla):
+{resumen_mes.to_string(index=False)}
+
+Forecast:
+{("Conservador=" + str(fc['conservador']) + ", Tendencial=" + str(fc['tendencial']) + ", Optimista=" + str(fc['optimista'])) if fc else "N/A"}
+
+Riesgo:
+Nivel={riesgo['level']} Score={riesgo['score']}/6 Meses_sin_datos={riesgo['missing_months']} Volatilidad_std={riesgo['volatilidad']}
+
+Entrega en este formato:
+1) Resumen ejecutivo (máx 6 bullets)
+2) Diagnóstico (qué explica el gap)
+3) Recomendaciones (acciones concretas, priorizadas)
+4) Riesgos y supuestos críticos
+5) Próximos pasos (qué medir / qué decisión tomar)
 """
-        st.download_button(
-            "⬇️ Descargar (MD)",
-            data=risk_md.encode("utf-8"),
-            file_name=f"riesgo_ejecutivo_{anio_sel}.md",
-            mime="text/markdown"
-        )
+            st.session_state["analisis_ia"] = gemini_generate(prompt)
 
+        if st.session_state["analisis_ia"]:
+            st.markdown(st.session_state["analisis_ia"])
 
-# -------------------------
-# TAB 5: IA TÉCNICA PREVENTA (RAG)
-# -------------------------
-with tab5:
-    st.subheader("5) IA Técnica Preventa (basado en manual PDF)")
-    st.caption("Responde SOLO con evidencia del manual. Si falta info, pide los datos faltantes (no inventa).")
+        st.markdown("### 📄 Exportar informe ejecutivo (PDF)")
+        titulo = st.text_input("Título del informe", value="Informe Ejecutivo — Dashboard + IA Generativa (MBA)")
+        if st.button("Generar PDF"):
+            pdf_file = "informe_ejecutivo_ai.pdf"
+            make_executive_pdf(
+                file_path=pdf_file,
+                titulo=titulo,
+                kpi_ytd=ytd,
+                kpi_fy=fy,
+                forecast=fc,
+                riesgo=riesgo,
+                analisis_ia=st.session_state.get("analisis_ia", ""),
+                tabla_mensual=resumen_mes
+            )
+            with open(pdf_file, "rb") as f:
+                st.download_button(
+                    label="⬇️ Descargar PDF",
+                    data=f,
+                    file_name=pdf_file,
+                    mime="application/pdf"
+                )
 
+# -------- TAB 4 --------
+with tab4:
+    st.subheader("IA Técnica Preventa (Gemini + RAG Manual)")
     pdf_path = find_manual_pdf()
+
     if not pdf_path:
-        st.warning(
-            "No encuentro un PDF del manual.\n\n"
-            "✅ Recomendado: súbelo a la repo en `manual_tecnico/`.\n"
-            "Ejemplo: `manual_tecnico/Manual_tecnico_preventa.pdf`"
-        )
+        st.warning("No encuentro el PDF del manual. Súbelo como 'Manual_tecnico_preventa.pdf' en la raíz o dentro de 'manual_tecnico/'.")
         st.stop()
 
-    st.caption(f"Manual detectado: `{pdf_path}`")
+    st.caption(f"Manual detectado: `{pdf_path}` | Modelo Gemini: {pick_gemini_model()}")
 
-    try:
-        manual_text = load_manual_text(pdf_path)
-    except Exception as e:
-        st.error(f"No pude leer el PDF: {type(e).__name__}: {e}")
-        st.stop()
-
+    manual_text = load_manual_text(pdf_path)
     if not manual_text:
-        st.warning("Pude abrir el PDF, pero no pude extraer texto. Si está escaneado, expórtalo como PDF con texto seleccionable.")
+        st.warning("Pude abrir el PDF, pero no pude extraer texto (posible PDF escaneado). Exporta desde Google Docs como PDF con texto.")
         st.stop()
 
-    manual_chunks = chunk_text(manual_text, chunk_size=1300, overlap=180)
-    st.success(f"Manual cargado. Chunks: {len(manual_chunks)}")
+    chunks = chunk_text(manual_text)
 
-    model_choice = st.selectbox("Modelo para IA Técnica", DEFAULT_MODEL_CANDIDATES, index=0, key="model_tech")
+    if "chat_tecnico" not in st.session_state:
+        st.session_state["chat_tecnico"] = []
 
-    # Chat history
-    if "chat_tech" not in st.session_state:
-        st.session_state["chat_tech"] = []
+    for m in st.session_state["chat_tecnico"]:
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
 
-    # Render history
-    for msg in st.session_state["chat_tech"]:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
+    pregunta = st.chat_input("Ej: Snack 250g, VFFS, vida útil 6 meses, cliente quiere bajar micras. ¿Qué ofrezco?")
 
-    pregunta = st.chat_input("Ej: Café 500g, VFFS, vida útil 12 meses, zipper, válvula, destino exportación.")
     if pregunta:
-        st.session_state["chat_tech"].append({"role": "user", "content": pregunta})
+        st.session_state["chat_tecnico"].append({"role": "user", "content": pregunta})
         with st.chat_message("user"):
             st.markdown(pregunta)
 
-        # RAG context
-        context = short_context(pregunta, manual_chunks, k=6, max_chars=6500)
+        ctx = retrieve_chunks(chunks, pregunta, top_k=4)
+        contexto_txt = "\n\n---\n\n".join([f"[Fragmento {i+1}]\n{c}" for i, c in enumerate(ctx)])
 
-        # Si no encontramos evidencia fuerte, pedimos más datos (sin inventar)
-        if not context:
-            with st.chat_message("assistant"):
-                st.warning(
-                    "No encuentro evidencia suficiente en el manual para responder.\n\n"
-                    "Para ayudarte, dime por favor:\n"
-                    "- Producto y vida útil\n"
-                    "- Tipo de empaque (bolsa/bobina) y máquina (VFFS/HFFS)\n"
-                    "- Requisitos barrera (O2/H2O/luz)\n"
-                    "- Gramaje/peso y dimensiones\n"
-                    "- Condiciones de almacenamiento"
-                )
-            st.session_state["chat_tech"].append({
-                "role": "assistant",
-                "content": "No encuentro evidencia suficiente en el manual. Por favor comparte: producto/vida útil, tipo de empaque, máquina, barrera, peso/dimensiones y almacenamiento."
-            })
-        else:
-            # Prompt final
-            prompt = f"""
-Eres ingeniero/a preventa senior en empaque plástico flexible (bolsa y bobina).
-Debes responder SOLO usando la EVIDENCIA del manual dentro de CONTEXTO.
-Si algo NO está en el contexto, debes pedir los datos faltantes (no inventes).
+        prompt = f"""
+Eres un Asistente Técnico de PREVENTA para empaque plástico flexible (bolsa/bobina).
 
-FORMATO DE SALIDA (obligatorio):
-1) Preguntas faltantes (si aplica)
-2) Opción A segura (máxima protección)
-3) Opción B optimizada costo
-4) Riesgos y trade-offs
-5) Evidencia usada (citas textuales cortas o referencias al CONTEXTO)
+REGLAS:
+- Responde SOLO usando la evidencia del CONTEXTO del manual.
+- Si el contexto NO contiene información suficiente, NO inventes: pide datos faltantes (producto, peso, vida útil, máquina VFFS/HFFS, barrera OTR/WVTR si aplica, calibre, tipo de sello, ancho, tipo de material, uso final, condiciones de almacenamiento).
+- Da dos opciones si aplica:
+  A) segura (bajo riesgo de reclamo)
+  B) optimizada costo (condicionada a prueba piloto)
+- Menciona claramente riesgos técnicos y comerciales (reclamo, shelf-life, barrera, sellado).
 
-CONTEXTO (EVIDENCIA):
-{context}
+FORMATO:
+1) Recomendación A (segura)
+2) Recomendación B (optimizada costo) — si aplica
+3) Datos faltantes / supuestos
+4) Riesgos (técnicos + comerciales)
+5) Evidencia del manual (referencia a Fragmento 1/2/3…)
 
-PREGUNTA DEL CLIENTE:
+CONTEXTO (manual):
+{contexto_txt if contexto_txt else "SIN CONTEXTO RELEVANTE ENCONTRADO."}
+
+CONSULTA:
 {pregunta}
 """
-            ans, err = gemini_generate(prompt, model_preference=model_choice)
-            if err:
-                with st.chat_message("assistant"):
-                    st.error("Error llamando a Gemini. Revisa tu API key y modelo.")
-                    st.code(err)
-                st.session_state["chat_tech"].append({"role": "assistant", "content": f"Error Gemini: {err}"})
-            else:
-                with st.chat_message("assistant"):
-                    st.markdown(ans)
-                st.session_state["chat_tech"].append({"role": "assistant", "content": ans})
+        respuesta = gemini_generate(prompt)
 
+        with st.chat_message("assistant"):
+            st.markdown(respuesta)
 
-# =========================
-# FOOTER: DEBUG OPCIONAL
-# =========================
-with st.expander("Diagnóstico (opcional)"):
-    st.write("Archivos en raíz:", os.listdir("."))
-    if os.path.isdir(MANUAL_DIR):
-        st.write("Archivos en manual_tecnico/:", os.listdir(MANUAL_DIR))
-    st.write("¿API Key detectada?:", "Sí" if _get_google_api_key() else "No")
+        st.session_state["chat_tecnico"].append({"role": "assistant", "content": respuesta})
