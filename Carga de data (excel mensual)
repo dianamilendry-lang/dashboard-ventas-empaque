@@ -1,5 +1,4 @@
-dashboard_app/
-  app.py
+dashboard_app/app.py
   requirements.txt
   data_uploads/          # opcional si guardas archivos
   manual_tecnico/        # aquí irá tu manual (pdf/docx/xlsx)
@@ -69,8 +68,3 @@ def cumplimiento(actual_long, budget_long):
     merged["var_kg"] = merged["actual_kg"] - merged["budget_kg"]
     merged["cumpl_kg"] = (merged["actual_kg"] / merged["budget_kg"]).replace([float("inf")], 0).fillna(0)
     return merged
-
-st.sidebar.selectbox()
-
-st.metric()
-
