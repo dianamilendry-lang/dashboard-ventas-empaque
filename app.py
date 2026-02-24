@@ -1,5 +1,4 @@
-dashboard-ventas-empaque
-│
-├── app.py
-├── requirements.txt
-└── manual_tecnico/
+import os
+import pandas as pd
+import streamlit as st
+import plotly.express as px
